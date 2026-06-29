@@ -70,10 +70,9 @@ public class LogisticsManagerMixin {
 
         for (int i = 0; i < allLinks.size(); i++) {
             GodDamnRepacker.LOGGER.info(
-                    "[GDR-PROBE]   link[{}] redstonePower={} blockEntity={}",
+                    "[GDR-PROBE]   link[{}] redstonePower={}",
                     i,
-                    allLinks.get(i).redstonePower,
-                    allLinks.get(i).getBlockEntity() == null ? "null" : allLinks.get(i).getBlockEntity().getClass().getSimpleName()
+                    allLinks.get(i).redstonePower
             );
         }
     }

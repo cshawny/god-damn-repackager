@@ -130,8 +130,10 @@ repositories {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
-    // Create 6.0.8 (build 291) for MC 1.20.1 — implementation so it's available at compile and runtime
-    implementation fg.deobf("com.simibubi.create:create-${minecraft_version}:${create_version}")
+    // Create 6.0.8 (build 291) for MC 1.20.1.
+    // The Create maven only ships an "-all" classifier jar (the fat jar with Catnip shaded in),
+    // so we must declare that classifier explicitly, otherwise ForgeGradle 404s looking for a plain jar.
+    implementation fg.deobf("com.simibubi.create:create-${minecraft_version}:${create_version}:all")
 
     // Mixin annotation processor (optional but catches errors at compile time)
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
@@ -156,18 +158,14 @@ tasks.named('processResources', ProcessResources).configure {
     }
 }
 
-// Configure the Mixin annotation processor to generate a refmap named after our mod
+// Configure the Mixin annotation processor to generate a refmap.
+// The refmap filename is taken from the "refmap" key in the mixins.json automatically.
 configurations {
     annotationProcessor
 }
 afterEvaluate {
     tasks.withType(JavaCompile).configureEach {
         options.annotationProcessorPath = configurations.annotationProcessor
-        options.compilerArgs += [
-                "-Aoutrefmap_file_name=${mod_id}.refmap.json",
-                "-AoutSrgFile=${project.buildDir}/createSrgToMcp/output.srg",
-                "-AreobfNotchSrgFile=${project.buildDir}/createSrgToMcp/output.srg"
-        ]
     }
 }
 
