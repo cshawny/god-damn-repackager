@@ -1,6 +1,6 @@
-package com.github.goddamnrepacker.mixin;
+package com.github.goddamnrepackager.mixin;
 
-import com.github.goddamnrepacker.GodDamnRepacker;
+import com.github.goddamnrepackager.GodDamnRepackager;
 import com.google.common.collect.Multimap;
 import com.simibubi.create.content.logistics.packager.PackagerBlockEntity;
 import com.simibubi.create.content.logistics.packager.PackagingRequest;

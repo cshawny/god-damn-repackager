@@ -1,11 +1,12 @@
 {
   "required": true,
   "minVersion": "0.8.5",
-  "package": "com.github.goddamnrepacker.mixin",
+  "package": "com.github.goddamnrepackager.mixin",
   "compatibilityLevel": "JAVA_17",
-  "refmap": "goddamnrepacker.refmap.json",
+  "refmap": "goddamnrepackager.refmap.json",
   "mixins": [
-    "LogisticsManagerMixin"
+    "LogisticsManagerMixin",
+    "RepackagerBlockEntityMixin"
   ],
   "client": [],
   "injectors": {

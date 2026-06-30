@@ -3,6 +3,12 @@ plugins {
     id 'idea'
     id 'maven-publish'
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    // MixinGradle: SpongePowered's official Gradle plugin. ForgeGradle 6's UserDevExtension
+    // removed the old `mixin {}` block, so without this plugin our mixin config is never
+    // registered in the dev environment (the "probe compiles but never fires" symptom).
+    // MixinGradle re-introduces the `mixin {}` extension at the PROJECT level and handles
+    // refmap generation + dev-env mixin config wiring.
+    id 'org.spongepowered.mixin' version '0.7-SNAPSHOT'
 }
 
 version = mod_version
@@ -10,6 +16,12 @@ group = mod_group_id
 
 base {
     archivesName = mod_id
+}
+
+// === Mixin configuration (provided by the org.spongepowered.mixin plugin above) ===
+mixin {
+    add sourceSets.main, "${mod_id}.refmap.json"
+    config "${mod_id}.mixins.json"
 }
 
 // Mojang ships Java 17 to end users in 1.18+, so your mod should target Java 17.
@@ -63,15 +75,21 @@ minecraft {
             workingDirectory project.file('run')
 
             // Recommended logging data for a userdev environment
-            // The markers can be added/remove as needed separated by commas.
-            // "SCAN": For mods scan.
-            // "REGISTRIES": For firing of registry events.
-            // "REGISTRYDUMP": For getting the contents of all registries.
             property 'forge.logging.markers', ''
 
             // Recommended logging level for the console
             property 'forge.logging.console.level', 'info'
 
+            // === Mixin refmap remapping (CRITICAL) ===
+            // Without these, Create/Ponder/Flywheel's bundled refmaps (which target SRG names
+            // like m_5741_) are NOT translated back to dev-environment names (like resizeDisplay),
+            // and every one of their mixins fails to apply with "could not find any targets".
+            // Our own goddamnrepacker.refmap.json is also remapped here (registered via the
+            // `mixin {}` block at the top of this file).
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${project.projectDir}/build/createSrgToMcp/output.srg"
+
+            // Make our own mod's sources available to the run
             mods {
                 "${mod_id}" {
                     source sourceSets.main
@@ -110,17 +128,27 @@ minecraft {
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 repositories {
-    // Create mod maven (new location, formerly maven.simibubi.com)
+    // Create, Ponder, Flywheel (Create's maven, formerly maven.simibubi.com)
     maven {
         name = "Create Maven"
         url = "https://maven.createmod.net/"
     }
-    // Catnip (Create's utility library dependency)
+    // Registrate mirror
     maven {
-        name = "Catnip"
-        url = "https://maven.createmod.net/"
+        name = "Registrate Mirror"
+        url = "https://maven.ithundxr.dev/mirror"
     }
-    // Mixin annotations / SpongePowered (Forge bundles Mixin, but we want the annotation processor for compile-time checks)
+    // ForgeConfigAPIPort (transitive dep of some Create deps)
+    maven {
+        name = "ForgeConfigAPIPort"
+        url = "https://raw.githubusercontent.com/Fuzss/modresources/main/maven/"
+    }
+    // JEI
+    maven {
+        name = "BlameJared"
+        url = "https://maven.blamejared.com/"
+    }
+    // Mixin annotation processor sources
     maven {
         name = "SpongePowered"
         url = "https://repo.spongepowered.org/repository/maven-public/"
@@ -130,13 +158,47 @@ repositories {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
-    // Create 6.0.8 (build 291) for MC 1.20.1.
-    // The Create maven only ships an "-all" classifier jar (the fat jar with Catnip shaded in),
-    // so we must declare that classifier explicitly, otherwise ForgeGradle 404s looking for a plain jar.
-    implementation fg.deobf("com.simibubi.create:create-${minecraft_version}:${create_version}:all")
+    // Create 6.0.8 dev-environment dependency.
+    // Per official Create wiki ("Depend on Create", Forge 1.20.1).
+    // :slim + explicit Ponder/Flywheel/Registrate makes the Mixin refmaps remap correctly
+    // in the dev environment. The :all fat jar does NOT remap and crashes with catnip/ponder mixin errors.
+    implementation(fg.deobf("com.simibubi.create:create-${minecraft_version}:${create_version}:slim") { transitive = false })
+    implementation(fg.deobf("net.createmod.ponder:Ponder-Forge-${minecraft_version}:${ponder_version}"))
+    compileOnly(fg.deobf("dev.engine-room.flywheel:flywheel-forge-api-${minecraft_version}:${flywheel_version}"))
+    runtimeOnly(fg.deobf("dev.engine-room.flywheel:flywheel-forge-${minecraft_version}:${flywheel_version}"))
+    implementation(fg.deobf("com.tterrag.registrate:Registrate:${registrate_version}"))
 
-    // Mixin annotation processor (optional but catches errors at compile time)
+    // MixinExtras (Create and its deps use it)
+    compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:0.4.1"))
+    implementation("io.github.llamalad7:mixinextras-forge:0.4.1")
+
+    // JEI — needed to issue crafting orders in-game (the only way to send a bulk crafting request).
+    // runtimeOnly only: we don't compile against JEI, we just need it present to place crafting orders.
+    runtimeOnly(fg.deobf("mezz.jei:jei-${minecraft_version}-forge:${jei_version}"))
+
+    // Mixin annotation processor (catches our own injection errors at compile time)
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+}
+
+// === Copy the generated refmap into the resources output ===
+// MixinGradle generates goddamnrepackager.refmap.json in build/tmp/compileJava during compilation,
+// but ForgeGradle's dev environment loads the mod from build/resources/main — so if the refmap
+// isn't copied there, Forge reports "refmap could not be read" and our mixins fail to resolve
+// their injection targets (the "mixin class is invalid" error).
+// This task copies the refmap next to the mod's resources as soon as it's generated.
+tasks.register('copyRefmap', Copy) {
+    from("$buildDir/tmp/compileJava") {
+        include "${mod_id}.refmap.json"
+    }
+    into "$buildDir/resources/main"
+    dependsOn 'compileJava'
+}
+tasks.named('processResources').configure { dependsOn 'copyRefmap' }
+// Also make sure the refmap is refreshed before each client/server run.
+afterEvaluate {
+    ['runClient', 'runServer', 'runGameTestServer'].each { tn ->
+        if (tasks.findByName(tn)) tasks.named(tn).configure { dependsOn 'copyRefmap' }
+    }
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.
