@@ -180,26 +180,10 @@ dependencies {
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
 }
 
-// === Copy the generated refmap into the resources output ===
-// MixinGradle generates goddamnrepackager.refmap.json in build/tmp/compileJava during compilation,
-// but ForgeGradle's dev environment loads the mod from build/resources/main — so if the refmap
-// isn't copied there, Forge reports "refmap could not be read" and our mixins fail to resolve
-// their injection targets (the "mixin class is invalid" error).
-// This task copies the refmap next to the mod's resources as soon as it's generated.
-tasks.register('copyRefmap', Copy) {
-    from("$buildDir/tmp/compileJava") {
-        include "${mod_id}.refmap.json"
-    }
-    into "$buildDir/resources/main"
-    dependsOn 'compileJava'
-}
-tasks.named('processResources').configure { dependsOn 'copyRefmap' }
-// Also make sure the refmap is refreshed before each client/server run.
-afterEvaluate {
-    ['runClient', 'runServer', 'runGameTestServer'].each { tn ->
-        if (tasks.findByName(tn)) tasks.named(tn).configure { dependsOn 'copyRefmap' }
-    }
-}
+// NOTE: MixinGradle's built-in `addMixinsToJar` task already injects the generated refmap into
+// the jar AND wires it into the dev classpath. We previously added a manual `copyRefmap` task,
+// but that caused a "duplicate refmap" error at jar time — so it's been removed. MixinGradle
+// handles refmap placement on its own.
 
 // This block of code expands all declared replace properties in the specified resource targets.
 // A missing property will result in an error. Properties are expanded using ${} Groovy notation.

@@ -7,6 +7,7 @@ Java: 17.0.11, JVM: 17.0.11+9-LTS (Microsoft), Arch: amd64
 
 Path for java installation 'C:\Users\cshaw\.jdks\JetBrainsRuntime-jbr21' (IntelliJ IDEA) does not contain a java executable
 
+> Task :clean
 > Task :downloadMcpConfig
 > Task :extractSrg
 > Task :createMcpToSrg
@@ -22,7 +23,7 @@ Path for java installation 'C:\Users\cshaw\.jdks\JetBrainsRuntime-jbr21' (Intell
 注: Writing searge composite mappings to D:\god-damn-repackager\build\tmp\compileJava\compileJava-mappings.tsrg
 
 > Task :addMixinsToJar
-> Task :processResources UP-TO-DATE
+> Task :processResources
 > Task :classes
 > Task :jar
 > Task :configureReobfTaskForReobfJar
@@ -39,5 +40,5 @@ Path for java installation 'C:\Users\cshaw\.jdks\JetBrainsRuntime-jbr21' (Intell
 > Task :check UP-TO-DATE
 > Task :build
 
-BUILD SUCCESSFUL in 31s
-11 actionable tasks: 10 executed, 1 up-to-date
+BUILD SUCCESSFUL in 16s
+12 actionable tasks: 12 executed
