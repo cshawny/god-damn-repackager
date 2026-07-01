@@ -1,0 +1,34 @@
+LOGO PROMPT (for nano banana / AI image generation)
+====================================================
+
+This is for generating a Minecraft mod logo (square, typically 200x200 or 256x256,
+used on CurseForge / Modrinth mod pages). Style should match the "Create" mod's
+aesthetic: warm industrial, brass/copper tones, mechanical, slightly cartoonish.
+
+-------------------- PROMPT --------------------
+
+A square Minecraft mod logo icon. Centered composition on a clean transparent or
+soft beige background. The main subject: THREE mechanical "Repackager" machines
+from the Create mod (brass-colored boxy industrial blocks with a front panel and
+a small package/cardboard-box being ejected) arranged in a tight triangular cluster,
+ALL THREE actively shooting out small brown cardboard packages at once — little
+packages flying outward in three directions simultaneously to convey parallel
+processing. A single large input pipe/vault feeds into the cluster from behind.
+
+Mood: energetic, satisfying, "finally working in parallel". Brass, copper, warm
+orange, and brown cardboard colors. Clean vector-like illustration style matching
+the Create mod's blocky isometric art style. Subtle motion lines on the ejected
+packages. No text, no words, no letters. The image should read clearly even at
+small thumbnail size.
+
+Negative prompt: text, words, letters, watermark, signature, realistic, photo,
+blurry, cluttered, dark background, human, character.
+
+-------------------- END PROMPT --------------------
+
+Notes:
+- If the generator struggles with "three machines", simplify to ONE Repackager
+  block ejecting a fan/burst of multiple packages in parallel (still conveys the idea).
+- The Create mod's Repackager looks like a brass/orange boxy block with a front
+  face that opens. Reference Create's actual block texture for accuracy if possible.
+- Square aspect ratio is important for mod page display.

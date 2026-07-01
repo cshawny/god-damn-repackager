@@ -23,7 +23,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * PHASE 2 Mixin — parallel repackaging via load balancing.
+ * Parallel repackaging via load-balanced distribution (思路 A).
  *
  * Bottleneck (probe-confirmed): the repackager that wins the fragment race assembles the ENTIRE
  * order's packages and dumps them all into its own queuedExitingPackages. Each repackager emits
@@ -31,17 +31,21 @@ import java.util.Set;
  * even when several share the same vault.
  *
  * Fix: intercept the `queuedExitingPackages.addAll(boxesToExport)` call (L134 of
- * attemptToRepackage). Instead of giving the whole batch to `this`, distribute it across
- * all IDLE sibling repackagers attached to the same vault. N idle repackagers => ~N× throughput.
+ * attemptToRepackage). Instead of giving the whole batch to `this`, distribute it across ALL
+ * sibling repackagers attached to the same vault, weighted by current queue depth (greedy
+ * load balancing — each unit goes to whoever has the shortest queue).
+ *
+ * Why ALL siblings (not just idle ones): adding to queuedExitingPackages is independent of the
+ * shipment animation, so a busy repackager mid-shipment can still absorb new packages into its
+ * queue; the load balancer naturally gives it less when its queue is already long.
  *
  * Safety:
- *  - Only hand packages to repackagers that are fully idle (heldBox empty, queue empty,
- *    animationTicks==0). A busy one keeps nothing, so its in-flight shipment is untouched.
- *  - We partition boxesToExport into disjoint sublists — each package lives in exactly one
- *    recipient's queue. No package is duplicated (no dupe).
- *  - The winning repackager (`this`) is always included as a recipient, so if no siblings
- *    are idle, behavior is identical to vanilla (it keeps the whole batch).
+ *  - boxesToExport is split by COUNT (BigItemStack.count is the real shipment count), not by
+ *    list element. Disjoint counts across recipients => no dupe.
+ *  - The winning repackager (`this`) is always a recipient, so with no siblings behavior is
+ *    identical to vanilla (it keeps the whole batch).
  *  - notifyUpdate() is called on every non-self recipient so clients animate correctly.
+ *  - A SPLIT MISMATCH guard logs a warning if assigned != total (would indicate a real bug).
  */
 @Mixin(value = RepackagerBlockEntity.class, remap = false)
 public class RepackagerBlockEntityMixin {
