@@ -40,5 +40,5 @@ Path for java installation 'C:\Users\cshaw\.jdks\JetBrainsRuntime-jbr21' (Intell
 > Task :check UP-TO-DATE
 > Task :build
 
-BUILD SUCCESSFUL in 16s
+BUILD SUCCESSFUL in 14s
 12 actionable tasks: 12 executed

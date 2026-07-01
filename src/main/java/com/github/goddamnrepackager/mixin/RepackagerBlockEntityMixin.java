@@ -75,45 +75,77 @@ public class RepackagerBlockEntityMixin {
         int totalPackages = 0;
         for (BigItemStack bis : batch) totalPackages += Math.max(1, bis.count);
 
-        // Find all idle sibling repackagers on the same vault (including self).
-        List<RepackagerBlockEntity> recipients = findIdleSiblingRepackagers(self);
+        // Find all sibling repackagers on the same vault that are AVAILABLE to receive work.
+        // "Available" = not currently mid-shipment animation (heldBox empty, animationTicks==0).
+        // Unlike the old isIdle() check, a non-empty queue is OK — we balance by load below,
+        // so a nearly-empty queue (busy sibling about to finish) can still get new work.
+        List<RepackagerBlockEntity> recipients = findAvailableSiblingRepackagers(self);
         int n = recipients.size();
 
-        GodDamnRepackager.LOGGER.info(
-                "[GDR-DIST] pos={} distributing {} shipments ({} distinct stacks) across {} idle repackager(s)",
-                selfPos.toShortString(), totalPackages, batch.size(), n
-        );
-
         if (n <= 1) {
-            // No idle siblings — vanilla behavior: keep the whole batch on self.
+            GodDamnRepackager.LOGGER.info(
+                    "[GDR-DIST] pos={} keeping {} shipments (no available siblings)",
+                    selfPos.toShortString(), totalPackages
+            );
             return queue.addAll(batch);
         }
 
-        // Split each BigItemStack's count across recipients.
-        // For a stack with count C across N recipients: recipient i gets a copy with count = C/N
-        // (plus 1 for the first C%N recipients to absorb remainder). Disjoint counts => no dupe.
+        GodDamnRepackager.LOGGER.info(
+                "[GDR-DIST] pos={} distributing {} shipments ({} distinct stacks) across {} repackager(s)",
+                selfPos.toShortString(), totalPackages, batch.size(), n
+        );
+
+        // === Load-balanced split ===
+        // Each recipient's "weight" = its current pending shipment count (queuedExitingPackages).
+        // We allocate the new packages to minimize the MAX queue depth across recipients after
+        // assignment — i.e., pour new packages onto whoever has the shortest queue first.
+        // This naturally lets a busy-but-soon-idle repackager (short queue) grab new work.
+        int[] currentLoad = new int[n];
+        for (int i = 0; i < n; i++) {
+            currentLoad[i] = pendingShipmentCount(recipients.get(i));
+        }
+
         for (BigItemStack bis : batch) {
             int total = Math.max(1, bis.count);
-            int base = total / n;
-            int remainder = total % n;
+            int[] share = new int[n];
+            // Greedy: assign each of the `total` units to whichever recipient currently has
+            // the lowest (currentLoad + share). Ties broken by index order (stable).
+            for (int u = 0; u < total; u++) {
+                int best = 0;
+                for (int i = 1; i < n; i++) {
+                    if (currentLoad[i] + share[i] < currentLoad[best] + share[best]) {
+                        best = i;
+                    }
+                }
+                share[best]++;
+            }
+
+            // Hand out each recipient's share.
             int assigned = 0;
             for (int i = 0; i < n; i++) {
-                int share = base + (i < remainder ? 1 : 0);
-                if (share <= 0) continue;
+                if (share[i] <= 0) continue;
                 RepackagerBlockEntity recipient = recipients.get(i);
-                // Copy the stack with the recipient's share of the count.
-                BigItemStack shareStack = new BigItemStack(bis.stack.copy(), share);
+                BigItemStack shareStack = new BigItemStack(bis.stack.copy(), share[i]);
                 recipient.queuedExitingPackages.add(shareStack);
+                currentLoad[i] += share[i];
                 if (recipient != self) {
                     recipient.notifyUpdate();
                 }
-                assigned += share;
-                GodDamnRepackager.LOGGER.info(
-                        "[GDR-DIST]   -> pos={} gets {}x of a stack",
-                        recipient.getBlockPos().toShortString(), share
-                );
+                assigned += share[i];
             }
-            // Sanity: assigned should equal total. If not, something's wrong — log it.
+            // Log this stack's split.
+            StringBuilder splitLog = new StringBuilder();
+            for (int i = 0; i < n; i++) {
+                if (share[i] > 0) {
+                    if (splitLog.length() > 0) splitLog.append(", ");
+                    splitLog.append(recipients.get(i).getBlockPos().toShortString())
+                            .append("=").append(share[i]);
+                }
+            }
+            GodDamnRepackager.LOGGER.info(
+                    "[GDR-DIST]   stack({}x) split: {}",
+                    total, splitLog
+            );
             if (assigned != total) {
                 GodDamnRepackager.LOGGER.warn(
                         "[GDR-DIST] SPLIT MISMATCH: assigned={} total={} — possible item loss!",
@@ -122,27 +154,26 @@ public class RepackagerBlockEntityMixin {
             }
         }
 
-        // We added directly to each recipient's queue above (NOT via `queue.addAll`).
-        // Return true to mimic addAll returning "changed".
         return true;
     }
 
+    /** Sum of counts in a repackager's queuedExitingPackages = how many packages it still owes. */
+    private int pendingShipmentCount(RepackagerBlockEntity r) {
+        int sum = 0;
+        for (BigItemStack bis : r.queuedExitingPackages) sum += Math.max(0, bis.count);
+        return sum;
+    }
+
     /**
-     * Find all RepackagerBlockEntities that:
-     *  - are attached to the SAME inventory the winner repackager is attached to (same vault), AND
-     *  - are currently idle (heldBox empty, queuedExitingPackages empty, not animating).
+     * Find all RepackagerBlockEntities on the same vault. ALL of them are candidates — we do NOT
+     * exclude busy/animating ones, because adding to queuedExitingPackages is independent of the
+     * shipment animation: a repackager mid-shipment can still absorb new packages into its queue,
+     * and the tick() loop will ship them later. The load-balanced split (favoring shorter queues)
+     * decides who gets what.
+     *
      * Always includes `self` (the winner) as the first element.
-     *
-     * Strategy (robust against multi-block vaults & unknown facing):
-     *  1. Get self's target IItemHandler (the vault's shared handler) via targetInventory.getInventory().
-     *  2. Scan a small cube (radius 2) around self for other RepackagerBlockEntities.
-     *  3. For each candidate, compare ITS targetInventory.getInventory() to self's by object identity
-     *     (==). Multi-block vaults share ONE handler instance, so identity match == same vault.
-     *  4. Include candidates that are idle.
-     *
-     * This avoids the fragile direction/BlockFace arithmetic that previously missed one sibling.
      */
-    private List<RepackagerBlockEntity> findIdleSiblingRepackagers(RepackagerBlockEntity self) {
+    private List<RepackagerBlockEntity> findAvailableSiblingRepackagers(RepackagerBlockEntity self) {
         List<RepackagerBlockEntity> result = new ArrayList<>();
         result.add(self); // winner always included
 
@@ -172,18 +203,10 @@ public class RepackagerBlockEntityMixin {
                     IItemHandler sibInv = sibTb.getInventory();
                     if (sibInv != myInv) continue; // different inventory => not a sibling
 
-                    if (isIdle(sibling)) {
-                        result.add(sibling);
-                    }
+                    result.add(sibling);
                 }
             }
         }
         return result;
-    }
-
-    private boolean isIdle(RepackagerBlockEntity r) {
-        return r.heldBox.isEmpty()
-            && r.queuedExitingPackages.isEmpty()
-            && r.animationTicks == 0;
     }
 }
