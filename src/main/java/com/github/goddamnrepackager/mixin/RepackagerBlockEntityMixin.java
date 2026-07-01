@@ -83,17 +83,21 @@ public class RepackagerBlockEntityMixin {
         int n = recipients.size();
 
         if (n <= 1) {
-            GodDamnRepackager.LOGGER.info(
-                    "[GDR-DIST] pos={} keeping {} shipments (no available siblings)",
-                    selfPos.toShortString(), totalPackages
-            );
+            if (GodDamnRepackager.DEBUG_LOGGING) {
+                GodDamnRepackager.LOGGER.info(
+                        "[GDR-DIST] pos={} keeping {} shipments (no available siblings)",
+                        selfPos.toShortString(), totalPackages
+                );
+            }
             return queue.addAll(batch);
         }
 
-        GodDamnRepackager.LOGGER.info(
-                "[GDR-DIST] pos={} distributing {} shipments ({} distinct stacks) across {} repackager(s)",
-                selfPos.toShortString(), totalPackages, batch.size(), n
-        );
+        if (GodDamnRepackager.DEBUG_LOGGING) {
+            GodDamnRepackager.LOGGER.info(
+                    "[GDR-DIST] pos={} distributing {} shipments ({} distinct stacks) across {} repackager(s)",
+                    selfPos.toShortString(), totalPackages, batch.size(), n
+            );
+        }
 
         // === Load-balanced split ===
         // Each recipient's "weight" = its current pending shipment count (queuedExitingPackages).
@@ -133,19 +137,21 @@ public class RepackagerBlockEntityMixin {
                 }
                 assigned += share[i];
             }
-            // Log this stack's split.
-            StringBuilder splitLog = new StringBuilder();
-            for (int i = 0; i < n; i++) {
-                if (share[i] > 0) {
-                    if (splitLog.length() > 0) splitLog.append(", ");
-                    splitLog.append(recipients.get(i).getBlockPos().toShortString())
-                            .append("=").append(share[i]);
+            // Log this stack's split (only in debug mode).
+            if (GodDamnRepackager.DEBUG_LOGGING) {
+                StringBuilder splitLog = new StringBuilder();
+                for (int i = 0; i < n; i++) {
+                    if (share[i] > 0) {
+                        if (splitLog.length() > 0) splitLog.append(", ");
+                        splitLog.append(recipients.get(i).getBlockPos().toShortString())
+                                .append("=").append(share[i]);
+                    }
                 }
+                GodDamnRepackager.LOGGER.info(
+                        "[GDR-DIST]   stack({}x) split: {}",
+                        total, splitLog
+                );
             }
-            GodDamnRepackager.LOGGER.info(
-                    "[GDR-DIST]   stack({}x) split: {}",
-                    total, splitLog
-            );
             if (assigned != total) {
                 GodDamnRepackager.LOGGER.warn(
                         "[GDR-DIST] SPLIT MISMATCH: assigned={} total={} — possible item loss!",
