@@ -5,6 +5,7 @@ import com.simibubi.create.content.logistics.BigItemStack;
 import com.simibubi.create.content.logistics.packager.repackager.RepackagerBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.inventory.InvManipulationBehaviour;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraftforge.items.IItemHandler;
@@ -12,9 +13,14 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * PHASE 2 Mixin — parallel repackaging via load balancing.
@@ -177,6 +183,14 @@ public class RepackagerBlockEntityMixin {
      * and the tick() loop will ship them later. The load-balanced split (favoring shorter queues)
      * decides who gets what.
      *
+     * Strategy: repackagers sit on the OUTSIDE of the vault multi-block. They can be attached to
+     * any of the vault's constituent blocks, so a small radius around `self` may miss siblings on
+     * the far side of a large vault. To find ALL of them reliably:
+     *   1. Find the vault block `self` is attached to (its target inventory position).
+     *   2. Flood-fill from there to discover the whole vault multi-block (same IItemHandler identity).
+     *   3. For each vault block, check its 6 neighbors for RepackagerBlockEntities.
+     * This covers arbitrarily large vaults without a fixed radius.
+     *
      * Always includes `self` (the winner) as the first element.
      */
     private List<RepackagerBlockEntity> findAvailableSiblingRepackagers(RepackagerBlockEntity self) {
@@ -191,24 +205,100 @@ public class RepackagerBlockEntityMixin {
         IItemHandler myInv = myTb.getInventory();
         if (myInv == null) return result;
 
-        BlockPos origin = self.getBlockPos();
-        int radius = 2; // vault multi-block can be up to 3x3; siblings sit within 2 blocks
+        // Step 1: find the vault block self is attached to.
+        // The repackager's connecting face points AT the vault; the vault block is one step in
+        // that direction. We try each of the 6 directions and pick the one whose BlockEntity's
+        // inventory (if any) shares our IItemHandler identity.
+        BlockPos selfPos = self.getBlockPos();
+        BlockPos vaultStart = null;
+        for (Direction d : Direction.values()) {
+            BlockPos candidate = selfPos.relative(d);
+            BlockEntity be = level.getBlockEntity(candidate);
+            if (be == null) continue;
+            // Does this block expose the same handler we're attached to? We can't easily query an
+            // arbitrary BE's handler, so instead we check: is it a PackagerBlockEntity? No — vaults
+            // are not packagers. We just need any non-repackager BE as a flood-fill seed.
+            if (!(be instanceof RepackagerBlockEntity)) {
+                vaultStart = candidate;
+                break;
+            }
+        }
+        if (vaultStart == null) {
+            // Couldn't find the vault block; fall back to small-radius scan around self.
+            return findViaRadiusFallback(self, myInv, 2);
+        }
 
+        // Step 2: flood-fill the vault multi-block from vaultStart, bounded by a sane max size.
+        // We treat a position as part of the vault if its BlockEntity is NOT a RepackagerBlockEntity
+        // (vaults/crates/chests are not repackagers). We cap exploration to avoid runaway scans.
+        Set<BlockPos> visited = new HashSet<>();
+        Deque<BlockPos> frontier = new ArrayDeque<>();
+        frontier.add(vaultStart);
+        int maxVaultBlocks = 200; // a 5x5x8 vault is 200; plenty of headroom
+        int scanned = 0;
+
+        while (!frontier.isEmpty() && visited.size() < maxVaultBlocks) {
+            BlockPos cur = frontier.poll();
+            if (!visited.add(cur)) continue;
+            scanned++;
+            if (scanned > maxVaultBlocks * 6) break; // hard cap on total iterations
+
+            BlockEntity be = level.getBlockEntity(cur);
+            // Vault constituent blocks are block entities with inventory (Vault, Crate, etc.)
+            // but NOT repackagers. Air/empty stops the flood.
+            if (be == null) continue;
+            if (be instanceof RepackagerBlockEntity) continue; // don't flood into siblings
+
+            // This is a vault block. Check its 6 neighbors for repackager siblings.
+            for (Direction d : Direction.values()) {
+                BlockPos neighbor = cur.relative(d);
+                // Enqueue for continued flood-fill (vault body).
+                if (!visited.contains(neighbor)) frontier.add(neighbor);
+            }
+        }
+
+        // Step 3: for each discovered vault block, scan its neighbors for repackager siblings.
+        Set<RepackagerBlockEntity> found = new LinkedHashSet<>();
+        found.add(self);
+        for (BlockPos vb : visited) {
+            for (Direction d : Direction.values()) {
+                BlockPos siblingPos = vb.relative(d);
+                if (siblingPos.equals(selfPos)) continue;
+                BlockEntity be = level.getBlockEntity(siblingPos);
+                if (!(be instanceof RepackagerBlockEntity sibling)) continue;
+                if (sibling == self) continue;
+                // Confirm same vault via handler identity (guards against a repackager that happens
+                // to sit next to the vault but is wired to a different inventory).
+                InvManipulationBehaviour sibTb = sibling.targetInventory;
+                if (sibTb == null) continue;
+                IItemHandler sibInv = sibTb.getInventory();
+                if (sibInv != myInv) continue;
+                found.add(sibling);
+            }
+        }
+        result.addAll(found);
+        // `self` may be duplicated (added at top + in `found`); dedupe preserving order.
+        return new ArrayList<>(new LinkedHashSet<>(result));
+    }
+
+    /** Fallback: scan a cube of given radius around self for sibling repackagers (old approach). */
+    private List<RepackagerBlockEntity> findViaRadiusFallback(RepackagerBlockEntity self, IItemHandler myInv, int radius) {
+        List<RepackagerBlockEntity> result = new ArrayList<>();
+        result.add(self);
+        Level level = self.getLevel();
+        if (level == null) return result;
+        BlockPos origin = self.getBlockPos();
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dy = -radius; dy <= radius; dy++) {
                 for (int dz = -radius; dz <= radius; dz++) {
                     BlockPos p = origin.offset(dx, dy, dz);
-                    if (p.equals(origin)) continue; // skip self's own position
+                    if (p.equals(origin)) continue;
                     BlockEntity be = level.getBlockEntity(p);
                     if (!(be instanceof RepackagerBlockEntity sibling)) continue;
                     if (sibling == self) continue;
-
-                    // Same vault? compare target handler by identity.
                     InvManipulationBehaviour sibTb = sibling.targetInventory;
                     if (sibTb == null) continue;
-                    IItemHandler sibInv = sibTb.getInventory();
-                    if (sibInv != myInv) continue; // different inventory => not a sibling
-
+                    if (sibTb.getInventory() != myInv) continue;
                     result.add(sibling);
                 }
             }
