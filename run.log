@@ -182,3 +182,33 @@ libpng warning: iCCP: known incorrect sRGB profile
 [11:56:23] [Server thread/INFO] [minecraft/MinecraftServer]: Saving chunks for level 'ServerLevel[New World]'/minecraft:overworld
 [11:56:23] [Server thread/INFO] [minecraft/MinecraftServer]: Saving chunks for level 'ServerLevel[New World]'/minecraft:the_end
 [11:56:23] [Server thread/INFO] [minecraft/MinecraftServer]: Saving chunks for level 'ServerLevel[New World]'/minecraft:the_nether
+[12:03:55] [Render thread/INFO] [me.je.fo.st.StartEventObserver/]: JEI StartEventObserver received class net.minecraftforge.client.event.ClientPlayerNetworkEvent$LoggingOut
+[12:03:55] [Render thread/INFO] [me.je.fo.st.StartEventObserver/]: JEI StartEventObserver transitioning state from JEI_STARTED to DISABLED
+[12:03:55] [Render thread/INFO] [me.je.li.st.JeiStarter/]: Stopping JEI
+[12:03:55] [Render thread/INFO] [me.je.li.lo.PluginCaller/]: Sending Runtime Unavailable...
+[12:03:55] [Render thread/INFO] [me.je.fo.pl.fo.ForgeGuiPlugin/]: Stopping JEI GUI
+[12:03:55] [Render thread/INFO] [me.je.li.lo.PluginCaller/]: Sending Runtime Unavailable took 1.175 ms
+[12:03:55] [Sound engine/ERROR] [mojang/OpenAlUtil]: Stop: Invalid name parameter.
+[12:03:55] [Server thread/INFO] [minecraft/ServerGamePacketListenerImpl]: Dev lost connection: 连接中断
+[12:03:55] [Server thread/INFO] [minecraft/MinecraftServer]: Dev退出了游戏
+[12:03:55] [Server thread/INFO] [minecraft/ServerGamePacketListenerImpl]: Stopping singleplayer server as player logged out
+[12:03:55] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server
+[12:03:55] [Server thread/INFO] [minecraft/MinecraftServer]: Saving players
+[12:03:55] [Server thread/INFO] [minecraft/MinecraftServer]: Saving worlds
+[12:03:55] [Server thread/INFO] [minecraft/MinecraftServer]: Saving chunks for level 'ServerLevel[New World]'/minecraft:overworld
+[12:03:57] [Server thread/INFO] [minecraft/MinecraftServer]: Saving chunks for level 'ServerLevel[New World]'/minecraft:the_end
+[12:03:57] [Server thread/INFO] [minecraft/MinecraftServer]: Saving chunks for level 'ServerLevel[New World]'/minecraft:the_nether
+[12:03:57] [Server thread/INFO] [minecraft/MinecraftServer]: ThreadedAnvilChunkStorage (New World): All chunks are saved
+[12:03:57] [Server thread/INFO] [minecraft/MinecraftServer]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[12:03:57] [Server thread/INFO] [minecraft/MinecraftServer]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[12:03:57] [Server thread/INFO] [minecraft/MinecraftServer]: ThreadedAnvilChunkStorage: All dimensions are saved
+[12:03:58] [Render thread/INFO] [minecraft/Minecraft]: Stopping!
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+See https://docs.gradle.org/8.1.1/userguide/command_line_interface.html#sec:command_line_warnings
+
+BUILD SUCCESSFUL in 9m 37s
+11 actionable tasks: 5 executed, 6 up-to-date
