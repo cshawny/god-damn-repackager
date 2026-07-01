@@ -1,73 +1,86 @@
-# CurseForge 模组介绍（中文，直接复制到 CurseForge 的 Description 区）
+# CurseForge Mod Description (English — copy directly into the Description editor)
 
-> CurseForge 的 Description 区支持 Markdown，下面内容可直接粘贴。
-
----
-
-## Summary（文件预览页的一句话摘要，填在 "Summary" 字段里）
-
-> 让同一保险库上的多个理包机并行处理一张大合成订单，N 个理包机带来最高 N 倍的订单处理速度。
+> CurseForge's Description field supports Markdown. Paste the content below.
 
 ---
 
-## Description（正文，粘贴到 Description 编辑器）
+## Summary (the one-line summary for the file preview page — paste into the "Summary" field)
 
-# 并行理包 / God Damn Repackager
+> Lets multiple Repackagers sharing one input vault process a single large crafting order in parallel — up to N× faster order fulfillment with N repackagers.
 
-> **⚠️ ALPHA 版本（0.2.0）**
-> 本模组处于早期测试阶段，通过 Mixin 修改机械动力的理包机核心逻辑，尚未经过大规模长期测试。
-> **使用前请务必备份存档。** 遇到 bug 欢迎在项目页反馈。
+---
 
-## 它解决什么问题？
+## Description (main body — paste into the Description editor)
 
-在原版机械动力（Create）6.0+ 中，通过仓库管理员（Stockkeeper）对合成器阵列下达大批量合成订单时（例如"合成 1000 个铁块"），**整张订单只会被一个理包机（Repackager）处理**。即使输入保险库周围贴满理包机，也只有其中一个在干活，其余全部闲置——一个理包机每秒只能输出一个包裹，大订单要等很久。
+# God Damn Repackager
 
-**并行理包**让同一保险库上的所有理包机并行分担订单：队列更短的理包机分到更多活，所有机器的产能都被利用起来。
+> **⚠️ ALPHA (0.2.0)**
+> This mod is in early testing. It uses a Mixin to modify Create's repackager core logic and
+> has not yet undergone large-scale, long-term stability testing. **Back up your world before
+> using it.** Bug reports are welcome on the project page.
 
-## 效果对比
+## The Problem
 
-| 场景 | 原版 | 加上本模组 |
+In vanilla Create 6.0+, when you place a large crafting order through the Stockkeeper for your
+crafter array (e.g. "craft 1000 iron blocks"), **the entire order is processed by a single
+Repackager**. Even if your input vault is surrounded by repackagers, only one of them does any
+work — the rest sit idle. A repackager emits only one package per second (20-tick animation
+cycle), so large orders take a very long time.
+
+**God Damn Repackager** makes all repackagers attached to the same input vault share the work.
+N repackagers ≈ N× throughput.
+
+## Speed Comparison
+
+| Scenario | Vanilla | With this mod |
 |---|---|---|
-| 1000 个合成，1 个理包机 | 约 1000 秒 | 约 1000 秒（无变化） |
-| 1000 个合成，3 个理包机 | 约 1000 秒（其余 2 个闲置） | 约 333 秒 |
-| 1000 个合成，9 个理包机 | 约 1000 秒（其余 8 个闲置） | 约 111 秒 |
+| 1000 crafts, 1 repackager | ~1000s | ~1000s (unchanged) |
+| 1000 crafts, 3 repackagers | ~1000s (2 idle) | ~333s |
+| 1000 crafts, 9 repackagers | ~1000s (8 idle) | ~111s |
 
-## 使用方法
+## Usage
 
-**不需要任何配置，开箱即用。** 像平时一样搭你的合成器阵列：
+**No configuration required — works out of the box.** Build your crafter array as usual:
 
 ```
-总仓库 ──订单──> 蛙港发货 ──> 输入保险库(装着原料包裹)
-                                   ↓
-                        多个理包机(贴红石块常开)
-                                   ↓
-                        打包机(拆包) → 动力合成器 → 产物
+Stockkeeper ──order──> Frogport ships materials ──> Input Vault (holds material packages)
+                                                          ↓
+                                            Multiple Repackagers (redstone block = always on)
+                                                          ↓
+                                            Packager (unwraps) → Mechanical Crafter → Output
 ```
 
-只要输入保险库周围有多个理包机，本模组就会自动让它们并行工作。理包机需贴在机械动力的保险库（Vault）上。
+As long as multiple repackagers are attached to the same input vault, this mod automatically
+parallelizes them. Repackagers must be placed against a Create **Vault**.
 
-## 安装
+## Installation
 
 1. Minecraft 1.20.1 + Forge 47.x
-2. 安装 **Create 6.0.x**（必需依赖，已测试 6.0.8）
-3. 将 jar 放入 `.minecraft/mods/`
+2. Install **Create 6.0.x** (required dependency; tested with 6.0.8)
+3. Drop the jar into `.minecraft/mods/`
 
-## 兼容性
+## Compatibility
 
-- ✅ 已测试：MC 1.20.1 + Forge 47.2.0 + Create 6.0.8
-- ✅ 已在含其它模组的整合包与多人服务器环境中测试，无冲突
-- ⚠️ 仅针对 Create 6.0.x 物流系统，不兼容 0.5.1 及更早版本
-- ⚠️ 仅 Forge 版本
+- ✅ Tested: MC 1.20.1 + Forge 47.2.0 + Create 6.0.8
+- ✅ Tested in modpack environments and on multiplayer servers alongside other mods — no conflicts
+- ⚠️ Targets the Create 6.0.x logistics system only; not compatible with Create 0.5.1 and earlier
+- ⚠️ Forge only (a Fabric port may come later)
 
-## 已知限制
+## Known Limitations
 
-- 当前为"负载均衡分配"实现：在理包机整理出订单包裹的瞬间决定谁分到多少。绝大多数实际场景下足够；极端情况下若有理包机在分配后空闲，它不会去抢别的理包机队列里的活。
-- 理包机需贴在机械动力保险库上。其它容器（板条箱、原版箱子）理论支持但未充分测试。
+- The current implementation is "load-balanced snapshot allocation": at the moment a repackager
+  assembles an order's packages, it decides who gets what based on current queue depth. This is
+  sufficient for the vast majority of real cases; in extreme edge cases a repackager that goes
+  idle *after* allocation won't "steal" work from another's queue.
+- Repackagers must be attached to a Create Vault. Other containers (Crates, vanilla chests) are
+  theoretically supported but not fully tested.
 
-## 许可证
+## License
 
-MIT License — 自由使用、修改、分发。源码与技术文档见项目 GitHub。
+MIT License — free to use, modify, and distribute. Source code and a full technical writeup
+(architecture, dev pitfalls, roadmap) are on the project GitHub.
 
-## 致谢
+## Credits
 
-- [Create](https://www.curseforge.com/minecraft/mc-mods/create) 及作者 simibubi —— 出色的机械动力模组
+- [Create](https://www.curseforge.com/minecraft/mc-mods/create) and its author simibubi —
+  an outstanding mod that this project builds upon.
