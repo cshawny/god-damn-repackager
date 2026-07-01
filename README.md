@@ -66,7 +66,7 @@ crafting order across all repackagers sharing the same input vault.
 ## 兼容性
 
 - ✅ 已测试：Minecraft 1.20.1 + Forge 47.2.0 + Create 6.0.8
-- ✅ 已在含其它模组的整合包环境和多人服务器中测试，无冲突
+- ✅ 已在含其它模组的环境和多人服务器中测试，无冲突
 - ⚠️ 仅针对 Create 6.0.x 的物流系统设计；不兼容 Create 0.5.1 及更早版本
 - ⚠️ 仅 Forge 版本（Fabric 移植见 [TECHNICAL.md](TECHNICAL.md) 的后续方向）
 
