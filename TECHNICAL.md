@@ -79,7 +79,8 @@ queuedExitingPackages.addAll(boxesToExport);   // 源码 L134
 1. 从 winner 理包机的位置出发，找到它连接的保险库方块
 2. 从该方块 flood-fill 整个保险库多方块结构（上限 200 块，防失控）
 3. 对每个保险库方块扫描 6 邻居，找出其中的 `RepackagerBlockEntity`
-4. 用 `IItemHandler` 身份匹配（`==`）确认兄弟理包机连的是同一个保险库
+4. 用 `InventoryIdentifier` 值相等（`equals`）确认兄弟理包机连的是同一个保险库。
+   对 vault 该标识是 `Bounds(BoundingBox)`，只比几何坐标，不受能力实例代次影响（详见 §3.7）
 
 > **为什么用 flood-fill 而不是固定半径扫描**：保险库可达 3×3×3 甚至更大，贴在对角的
 > 两个理包机距离可能 >2。早期版本用半径 2 扫描，导致 9 理包机场景只找到 3~5 个。
@@ -210,8 +211,54 @@ Create 里有两个相似但不同的方块：
 
 **根因**：早期用"winner 周围半径 2 的立方体"扫描，但大保险库对角的理包机距离 >2。
 
-**解法**：flood-fill 整个保险库多方块结构（见 §2.2①）。`IItemHandler` 身份匹配作为
-正确性保障——即使扫到别的理包机，连的不是同一个保险库也会被过滤。
+**解法**：flood-fill 整个保险库多方块结构（见 §2.2①）。`InventoryIdentifier` 值相等作为
+正确性保障——即使扫到别的理包机，连的不是同一个保险库也会被过滤（0.2.0 曾用 `IItemHandler ==`，
+因能力实例代次问题不可靠，0.2.1 改为值相等，见 §3.7）。
+
+### 3.7 能力实例身份匹配对缓存"代次"敏感（0.2.0 问题，0.2.1 已修复）
+
+**症状**：在**已存在的存档里首次安装本模组 0.2.0**（尤其服务器多人存档）后，一个保险库周围贴了
+9 个理包机，下一张订单却只有 6 个工作；而同样的阵列设计在**新存档/单人生存**里完全正常。
+把理包机拆掉**重新放一遍**就恢复正常。
+
+**根因**：0.2.0 的 sibling 校验用 `IItemHandler` 的 `==` 身份匹配（`RepackagerBlockEntityMixin`
+里的 `sibInv != myInv`）。这个 `IItemHandler` 不是凭空冒出来的——它是 `InvManipulationBehaviour.getInventory()`
+返回的 `targetCapability.orElse(null)`，而 `targetCapability` 是 forge 的 `LazyOptional` 缓存。
+
+保险库（`ItemVaultBlockEntity.initCapability`）的 controller 块**首次被查询能力时**才构造出
+`VersionedInventoryWrapper` 包 `CombinedInvWrapper`，非 controller 块把自己指向 controller 的同一个
+`LazyOptional`。这个 `LazyOptional` **不是永生的**：保险库多方块结构在 chunk 卸载/重载、controller
+切换、capability invalidate 时会重建，重建后对外暴露的就是一个**全新的 `IItemHandler` 实例**。
+Create 的 `CapManipulationBehaviourBase` 自己也有失效重建路径（`onHandlerInvalidated` 清缓存 +
+置 `findNewNextTick`，下个 `tick()` 调 `findNewCapability()` 重建）。
+
+所以身份匹配成立有一个**隐含前提：所有理包机的 `targetCapability` 缓存都指向同一代保险库能力实例**。
+在"老存档装新模组"时，各理包机当初是在没有本模组时放置的，`targetInventory` 的缓存在不同时刻、
+面对不同代次的保险库能力实例建立；服务器上区块反复加载、tick 分片、跨区块交互比单人更频繁地触发
+重建，于是不同理包机的缓存可能指向**不同代**的保险库能力实例——`sibInv != myInv`，兄弟被丢弃，
+表现为"只有部分理包机工作"。
+
+**为什么单人生存不受影响**：单人环境区块加载稳定、tick 顺序简单、极少触发保险库能力重建，
+理包机几乎都在同一代能力实例内完成缓存，身份一致。
+
+**为什么"重新放一遍就好"**：重新放置会**销毁并重建该理包机的 `InvManipulationBehaviour`**，
+`targetCapability` 重新指向保险库**当前**那一代能力实例。一旦所有理包机对齐到同一代，`==` 就一致了。
+
+**修复（0.2.1）**：改用 Create 自己的 `InventoryIdentifier` 值相等来判定同库，不再用 `IItemHandler ==`。
+具体：通过 `InvManipulationBehaviour.getIdentifiedInventory().identifier()` 取标识，对 vault 它是
+`InventoryIdentifier.Bounds(BoundingBox)`——一个 record，`equals` 只比多方块的两个角坐标（6 个 int），
+**完全不碰能力实例**。所以无论保险库能力重建多少次、各理包机的 `targetCapability` 缓存指向哪一代，
+只要保险库几何形状不变，`Bounds` 就相等，兄弟就不会被误判丢弃。
+
+> 注意：要比的是 `IdentifiedInventory.identifier()`，**不是整个 `IdentifiedInventory`**——后者是 record，
+> 但其 equals 同时包含 `IItemHandler` 字段，直接比两个 record 又会落回能力实例身份问题。
+
+此修复后，老存档安装 0.2.1 **无需重新放置理包机**。改动只影响"哪些理包机参与分配"这一判定，
+不触碰 count 切分、`BigItemStack` 分发、`SPLIT MISMATCH` 守卫——物品增减风险为零。
+
+> **诊断铁证**（仍适用于排查 sibling 漏找的其它成因，如 §3.6 的 flood-fill）：开启 `DEBUG_LOGGING`
+> 后看 `[GDR-DIST] ... across N repackager(s)` 的 N。N 应等于实际理包机数；若仍偏小，
+> 问题在 flood-fill 漏扫而非身份匹配。
 
 ---
 
@@ -293,6 +340,6 @@ Create 里有两个相似但不同的方块：
 |---|---|
 | Mixin 不触发，无报错 | MixinGradle 没配好，refmap 没生成（见 §3.1） |
 | `mixin class is invalid` | refmap 缺失或 target 描述符错（见 §3.1） |
-| 只有部分理包机工作 | sibling finder 漏找（保险库太大？检查 flood-fill） |
+| 只有部分理包机工作 | ① 若用 0.2.0：老存档能力缓存代次不一致，**升级到 0.2.1** 即解决（见 §3.7）；② sibling finder 漏找（保险库太大？检查 flood-fill）。用 `DEBUG_LOGGING` 的 `across N repackager(s)` 的 N 区分：0.2.1 下 N 仍偏小则是 ② |
 | 产物数量不对 | 立即查 `SPLIT MISMATCH` 警告；检查 count 切分逻辑 |
 | 游戏启动崩溃（打开仓库管理员时） | `@Inject` 参数类型和目标方法不匹配（见 §3.3） |

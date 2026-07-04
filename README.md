@@ -1,6 +1,6 @@
 # God Damn Repackager
 
-> **⚠️ ALPHA 版本（0.2.0）**
+> **⚠️ ALPHA 版本（0.2.1）**
 > 本模组目前处于早期测试阶段。它通过 Mixin 修改机械动力（Create）的理包机核心逻辑，
 > **尚未经过大规模、长时间的稳定性测试**。已知风险包括（但不限于）：
 > - 在未预见的边界场景下可能导致**物品丢失或异常**
@@ -9,6 +9,10 @@
 >
 > **使用前请务必备份你的存档。** 作者不对因使用本模组造成的任何数据损失负责。
 > 如果遇到 bug，欢迎在 GitHub Issues 提交（附上 `crash-reports/` 下的崩溃报告和游戏日志）。
+>
+> **ℹ️ 如果你用过 0.2.0：** 0.2.0 在已存在的存档（尤其多人服务器）里可能出现"下单后只有部分
+> 理包机工作"的问题，当时需要手动重新放置理包机。**0.2.1 已修复此问题**，升级后无需任何操作。
+> 详见下方[已知限制](#已知限制)。
 
 A Forge mod for Minecraft 1.20.1 that makes Create 6.0+'s Repackagers parallelize a single large
 crafting order across all repackagers sharing the same input vault.
@@ -44,8 +48,11 @@ crafting order across all repackagers sharing the same input vault.
 
 1. 安装 **Minecraft 1.20.1 + Forge 47.x**
 2. 安装 **Create 6.0.x**（已测试 6.0.8）
-3. 把 `goddamnrepackager-0.2.0.jar` 放进 `.minecraft/mods/` 文件夹
+3. 把 `goddamnrepackager-0.2.1.jar` 放进 `.minecraft/mods/` 文件夹
 4. 启动游戏
+
+> **从 0.2.0 升级？** 直接替换 jar 即可。0.2.0 曾要求在老存档里重新放置理包机，
+> 0.2.1 已修复此问题，升级后无需任何额外操作。详见下方[已知限制](#已知限制)。
 
 不需要任何配置，开箱即用。
 
@@ -72,6 +79,11 @@ crafting order across all repackagers sharing the same input vault.
 
 ## 已知限制
 
+- ~~**安装到已存在的存档后，需要重新放置理包机。**~~ **（0.2.1 已修复）** 0.2.0 在老存档
+  （尤其多人服务器）里可能出现"下单后只有部分理包机工作"（例如 9 个只有 6 个工作），当时需要
+  手动重新放置理包机。根因是 sibling 判定用了脆弱的 `IItemHandler ==`（能力实例代次敏感）。
+  **0.2.1 改用 Create 的 `InventoryIdentifier` 值相等判定同库，此问题不再出现，升级即可，无需
+  重新放置。** 技术细节见 [TECHNICAL.md §3.7](TECHNICAL.md)。
 - 当前实现（思路 A：负载均衡分配）是"一次性快照分配"——在理包机整理出订单包裹的那一瞬间决定
   谁分到多少。如果在那之后有理包机空闲下来，它不会去"抢"别的理包机队列里的活。
   在绝大多数实际场景下这已经足够；极端情况下的动态负载均衡（思路 B）见技术文档。

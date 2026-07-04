@@ -1,14 +1,15 @@
 package com.github.goddamnrepackager.mixin;
 
 import com.github.goddamnrepackager.GodDamnRepackager;
+import com.simibubi.create.api.packager.InventoryIdentifier;
 import com.simibubi.create.content.logistics.BigItemStack;
+import com.simibubi.create.content.logistics.packager.IdentifiedInventory;
 import com.simibubi.create.content.logistics.packager.repackager.RepackagerBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.inventory.InvManipulationBehaviour;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
-import net.minecraftforge.items.IItemHandler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -20,6 +21,7 @@ import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -38,6 +40,15 @@ import java.util.Set;
  * Why ALL siblings (not just idle ones): adding to queuedExitingPackages is independent of the
  * shipment animation, so a busy repackager mid-shipment can still absorb new packages into its
  * queue; the load balancer naturally gives it less when its queue is already long.
+ *
+ * Sibling matching: two repackagers are "siblings" when they tap the SAME inventory. We compare
+ * Create's InventoryIdentifier (a value-based record — for vaults it's Bounds(BoundingBox), which
+ * equals only on the multiblock's min/max corner coordinates). We deliberately do NOT compare the
+ * raw IItemHandler by identity (==): the handler instance is rebuilt whenever the vault's forge
+ * capability is invalidated (chunk unload/reload, controller change, capability refresh), so two
+ * repackagers placed before the mod existed — or whose caches were built at different moments —
+ * could hold different generations of the handler and would wrongly fail the == check. The
+ * InventoryIdentifier is stable across such rebuilds as long as the vault geometry is unchanged.
  *
  * Safety:
  *  - boxesToExport is split by COUNT (BigItemStack.count is the real shipment count), not by
@@ -191,8 +202,9 @@ public class RepackagerBlockEntityMixin {
      * any of the vault's constituent blocks, so a small radius around `self` may miss siblings on
      * the far side of a large vault. To find ALL of them reliably:
      *   1. Find the vault block `self` is attached to (its target inventory position).
-     *   2. Flood-fill from there to discover the whole vault multi-block (same IItemHandler identity).
-     *   3. For each vault block, check its 6 neighbors for RepackagerBlockEntities.
+     *   2. Flood-fill from there to discover the whole vault multi-block.
+     *   3. For each vault block, check its 6 neighbors for RepackagerBlockEntities, confirming
+     *      same-vault membership by InventoryIdentifier equality (see class javadoc).
      * This covers arbitrarily large vaults without a fixed radius.
      *
      * Always includes `self` (the winner) as the first element.
@@ -204,10 +216,8 @@ public class RepackagerBlockEntityMixin {
         Level level = self.getLevel();
         if (level == null) return result;
 
-        InvManipulationBehaviour myTb = self.targetInventory;
-        if (myTb == null) return result;
-        IItemHandler myInv = myTb.getInventory();
-        if (myInv == null) return result;
+        InventoryIdentifier myId = vaultIdentifierOf(self);
+        if (myId == null) return result;
 
         // Step 1: find the vault block self is attached to.
         // The repackager's connecting face points AT the vault; the vault block is one step in
@@ -229,7 +239,7 @@ public class RepackagerBlockEntityMixin {
         }
         if (vaultStart == null) {
             // Couldn't find the vault block; fall back to small-radius scan around self.
-            return findViaRadiusFallback(self, myInv, 2);
+            return findViaRadiusFallback(self, myId, 2);
         }
 
         // Step 2: flood-fill the vault multi-block from vaultStart, bounded by a sane max size.
@@ -271,12 +281,10 @@ public class RepackagerBlockEntityMixin {
                 BlockEntity be = level.getBlockEntity(siblingPos);
                 if (!(be instanceof RepackagerBlockEntity sibling)) continue;
                 if (sibling == self) continue;
-                // Confirm same vault via handler identity (guards against a repackager that happens
-                // to sit next to the vault but is wired to a different inventory).
-                InvManipulationBehaviour sibTb = sibling.targetInventory;
-                if (sibTb == null) continue;
-                IItemHandler sibInv = sibTb.getInventory();
-                if (sibInv != myInv) continue;
+                // Confirm same vault by InventoryIdentifier equality (guards against a repackager
+                // that happens to sit next to the vault but is wired to a different inventory).
+                // See class javadoc for why we use value equality here instead of IItemHandler ==.
+                if (!Objects.equals(myId, vaultIdentifierOf(sibling))) continue;
                 found.add(sibling);
             }
         }
@@ -286,7 +294,7 @@ public class RepackagerBlockEntityMixin {
     }
 
     /** Fallback: scan a cube of given radius around self for sibling repackagers (old approach). */
-    private List<RepackagerBlockEntity> findViaRadiusFallback(RepackagerBlockEntity self, IItemHandler myInv, int radius) {
+    private List<RepackagerBlockEntity> findViaRadiusFallback(RepackagerBlockEntity self, InventoryIdentifier myId, int radius) {
         List<RepackagerBlockEntity> result = new ArrayList<>();
         result.add(self);
         Level level = self.getLevel();
@@ -300,13 +308,26 @@ public class RepackagerBlockEntityMixin {
                     BlockEntity be = level.getBlockEntity(p);
                     if (!(be instanceof RepackagerBlockEntity sibling)) continue;
                     if (sibling == self) continue;
-                    InvManipulationBehaviour sibTb = sibling.targetInventory;
-                    if (sibTb == null) continue;
-                    if (sibTb.getInventory() != myInv) continue;
+                    if (!Objects.equals(myId, vaultIdentifierOf(sibling))) continue;
                     result.add(sibling);
                 }
             }
         }
         return result;
+    }
+
+    /**
+     * The stable identity of the inventory a repackager is attached to. Uses Create's
+     * {@link IdentifiedInventory#identifier()} rather than the raw IItemHandler, because the
+     * handler instance is rebuilt on capability invalidation (see class javadoc) while the
+     * InventoryIdentifier (for vaults: Bounds(BoundingBox)) is a stable value keyed on geometry.
+     * Returns null if the repackager has no target inventory or no resolvable identifier yet.
+     */
+    private InventoryIdentifier vaultIdentifierOf(RepackagerBlockEntity r) {
+        InvManipulationBehaviour tb = r.targetInventory;
+        if (tb == null) return null;
+        IdentifiedInventory inv = tb.getIdentifiedInventory();
+        if (inv == null) return null;
+        return inv.identifier();
     }
 }

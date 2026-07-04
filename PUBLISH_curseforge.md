@@ -14,10 +14,14 @@
 
 # God Damn Repackager
 
-> **⚠️ ALPHA (0.2.0)**
+> **⚠️ ALPHA (0.2.1)**
 > This mod is in early testing. It uses a Mixin to modify Create's repackager core logic and
 > has not yet undergone large-scale, long-term stability testing. **Back up your world before
 > using it.** Bug reports are welcome on the project page.
+>
+> **ℹ️ If you used 0.2.0:** 0.2.0 could cause "only some repackagers work after placing an order"
+> (e.g. 6 of 9) in an existing world, requiring you to re-place the repackagers. **Fixed in 0.2.1** —
+> just upgrade, no re-placement needed. See [Known Limitations](#known-limitations).
 
 ## The Problem
 
@@ -59,6 +63,10 @@ parallelizes them. Repackagers must be placed against a Create **Vault**.
 2. Install **Create 6.0.x** (required dependency; tested with 6.0.8)
 3. Drop the jar into `.minecraft/mods/`
 
+> **Upgrading from 0.2.0?** Just replace the jar. 0.2.0 used to require re-placing repackagers in an
+> existing world; **0.2.1 fixed this** — no re-placement needed after upgrade. See
+> [Known Limitations](#known-limitations).
+
 ## Compatibility
 
 - ✅ Tested: MC 1.20.1 + Forge 47.2.0 + Create 6.0.8
@@ -68,6 +76,15 @@ parallelizes them. Repackagers must be placed against a Create **Vault**.
 
 ## Known Limitations
 
+- ~~**Re-place repackagers after installing into an existing world.**~~ **(Fixed in 0.2.1)** 0.2.0 could
+  cause "only some repackagers work after placing an order" (e.g. 6 of 9) in a world that already existed —
+  far more often on multiplayer servers than in fresh single-player worlds. Cause: 0.2.0 identified sibling
+  repackagers by the identity (`==`) of the Forge capability instance they cached, which is rebuilt whenever
+  the vault's capability is invalidated, so repackagers placed before the mod existed could hold caches
+  pointing at different generations and fail the check. **0.2.1 fix:** siblings are now matched by Create's
+  `InventoryIdentifier` value equality (for vaults: a `Bounds(BoundingBox)` record comparing only the
+  multiblock's corner coordinates), which is stable across capability rebuilds. **Upgrading to 0.2.1 resolves
+  this — no re-placement needed.** (Technical detail in TECHNICAL.md §3.7.)
 - The current implementation is "load-balanced snapshot allocation": at the moment a repackager
   assembles an order's packages, it decides who gets what based on current queue depth. This is
   sufficient for the vast majority of real cases; in extreme edge cases a repackager that goes
