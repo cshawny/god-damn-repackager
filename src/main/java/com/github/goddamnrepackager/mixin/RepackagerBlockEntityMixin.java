@@ -301,12 +301,15 @@ public class RepackagerBlockEntityMixin {
         // === Mode 1: stall recovery. A stalled repackager can't ship; offload its
         // queue to a sibling that can. We do NOT touch the stalled one's heldBox
         // (that single in-flight package stays with it and ships once its downstream
-        // is restored) — we only move queuedExitingPackages entries.
+        // is restored) — we only move queuedExitingPackages entries. Because the donor is
+        // stalled, tick() is NOT touching its queue (verified by bytecode: tick()'s take
+        // branch is gated on heldBox.isEmpty()), so we may drain it ALL THE WAY to empty,
+        // including the head element — residual drops to 1 (just heldBox, the physical floor).
         for (int i = 0; i < n; i++) {
             RepackagerBlockEntity donor = siblings.get(i);
             if (!isStalled(donor)) continue;
             int donorLoad = pendingShipmentCount(donor);
-            if (donorLoad <= 1) continue; // only the head-locked entry left; nothing to move
+            if (donorLoad <= 0) continue; // queue already empty; only heldBox remains
 
             // Pick the least-loaded sibling that is NOT itself stalled to receive.
             // (A stalled receiver would just re-pile-up; skip them.)
@@ -324,13 +327,9 @@ public class RepackagerBlockEntityMixin {
             }
             if (receiver == null) continue; // every sibling is stalled; nothing we can do
 
-            // Aggressively drain the stalled donor down to its head (1 unit). Spread
-            // the moved load across receivers by capping at a sane per-pass amount so a
-            // single receiver doesn't get flooded; subsequent lazyTicks continue draining.
-            int drainTarget = donorLoad - 1;              // leave the head-locked entry
-            // Cap the move so we don't dump a huge backlog onto one receiver in one pass;
-            // (maxLoad - minLoad)/2 mirrors the conservative mode's step size, but applied
-            // here as an upper bound while still being aggressive vs. the stalled donor.
+            // Drain the stalled donor's ENTIRE queue (including the head). Cap the per-pass
+            // move so a single receiver isn't flooded; subsequent lazyTicks finish the drain.
+            int drainTarget = donorLoad;                  // empty the queue completely
             int balanceStep = Math.max(1, (donorLoad - receiverLoad) / 2);
             int toMove = Math.min(drainTarget, balanceStep);
             if (toMove <= 0) continue;
@@ -343,7 +342,7 @@ public class RepackagerBlockEntityMixin {
                         receiver.getBlockPos().toShortString(), receiverLoad, toMove
                 );
             }
-            return transferPackagesFromTail(self, donor, receiver, toMove);
+            return transferPackagesFromTail(self, donor, receiver, toMove, true);
         }
 
         // === Mode 2: conservative balance (no one stalled).
@@ -368,7 +367,7 @@ public class RepackagerBlockEntityMixin {
 
         RepackagerBlockEntity donor = siblings.get(maxIdx);
         RepackagerBlockEntity receiver = siblings.get(minIdx);
-        return transferPackagesFromTail(self, donor, receiver, toMove);
+        return transferPackagesFromTail(self, donor, receiver, toMove, false);
     }
 
     /**
@@ -394,25 +393,30 @@ public class RepackagerBlockEntityMixin {
      * {@code receiver}'s queue TAIL. Walks the donor's queue from the end backward,
      * splitting the last BigItemStack if it has more units than remain to move.
      *
-     * The donor's HEAD element (index 0, the one tick() is currently decrementing)
-     * is never the source of a move: as long as there is more than one entry we
-     * operate on the tail; if there is exactly one entry we only split it when its
-     * count exceeds what we still need (leaving the head entry — and its identity —
-     * in place for tick()).
+     * Head-element handling depends on {@code allowHeadRemoval}:
+     *  - false (conservative-balance mode): the donor's HEAD element (index 0, the one
+     *    tick() is normally decrementing) is never removed — if it's the only entry we
+     *    split it instead of moving the whole thing, preserving the donor's send rhythm.
+     *  - true (stall-recovery mode): the donor is STALLED (heldBox non-empty, downstream
+     *    not pulling), so tick() is NOT touching the queue at all (verified by bytecode:
+     *    tick()'s take-item branch is gated on heldBox.isEmpty()). The queue is frozen
+     *    during a stall, so removing the head element — even emptying the queue entirely —
+     *    is safe: there's no concurrent reader/writer. This lets us drain a stalled donor
+     *    all the way to empty (residual drops to 1 = just its heldBox, the physical floor).
      */
     private int transferPackagesFromTail(
             RepackagerBlockEntity self,
             RepackagerBlockEntity donor,
             RepackagerBlockEntity receiver,
-            int toMove
+            int toMove,
+            boolean allowHeadRemoval
     ) {
         List<BigItemStack> donorQueue = donor.queuedExitingPackages;
         List<BigItemStack> receiverQueue = receiver.queuedExitingPackages;
         int remaining = toMove;
         int moved = 0;
 
-        // Walk from the tail. Stop when we've moved enough or only the head is left
-        // AND moving its whole count would empty it (we must not remove the head).
+        // Walk from the tail. Stop when we've moved enough or the queue is empty.
         while (remaining > 0 && !donorQueue.isEmpty()) {
             int lastIdx = donorQueue.size() - 1;
             BigItemStack tail = donorQueue.get(lastIdx);
@@ -425,13 +429,13 @@ public class RepackagerBlockEntityMixin {
             }
 
             if (tailCount <= remaining) {
-                // Whole tail entry moves — unless it is also the HEAD (the only entry),
-                // in which case tick() may be mid-decrement on it; preserve its identity
-                // by splitting instead of removing. This keeps the donor's send rhythm
-                // uninterrupted even in the single-entry case.
+                // Whole tail entry moves. The only restriction: in conservative mode we
+                // never REMOVE the head (index 0) — we split it instead so tick()'s
+                // decrement target keeps its identity. In stall-recovery mode the queue
+                // is frozen (no concurrent tick access), so removing the head is safe.
                 boolean isHead = (lastIdx == 0);
-                if (isHead) {
-                    // Split: shave off what we still need, keep the head entry in place.
+                if (isHead && !allowHeadRemoval) {
+                    // Conservative: split, keep the head entry in place.
                     tail.count -= remaining;
                     receiverQueue.add(new BigItemStack(tail.stack.copy(), remaining));
                     moved += remaining;
