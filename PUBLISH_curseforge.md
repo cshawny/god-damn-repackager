@@ -14,7 +14,7 @@
 
 # God Damn Repackager
 
-> **⚠️ ALPHA (0.2.1)**
+> **⚠️ ALPHA (0.3.0)**
 > This mod is in early testing. It uses a Mixin to modify Create's repackager core logic and
 > has not yet undergone large-scale, long-term stability testing. **Back up your world before
 > using it.** Bug reports are welcome on the project page.
@@ -56,6 +56,19 @@ Stockkeeper ──order──> Frogport ships materials ──> Input Vault (hol
 
 As long as multiple repackagers are attached to the same input vault, this mod automatically
 parallelizes them. Repackagers must be placed against a Create **Vault**.
+
+## How it works
+
+The mod uses two complementary layers:
+
+1. **Snapshot allocation** — When a repackager assembles an order's packages, it would normally dump
+   the whole batch into its own send queue. The mod intercepts this and instead distributes the packages
+   across all repackagers on the same vault, weighted by current queue depth (shorter queue = more work).
+2. **Dynamic rebalancing** *(new in 0.3.0)* — Every ~0.5s, if one repackager is badly backlogged while
+   another is idle, a slice of the backlog is moved from the busy one's queue tail to the idle one's. So
+   even if one repackager's downstream path clogs, its work is picked up by idle siblings and overall
+   throughput isn't dragged down by a single stalled machine. Rebalancing is order-preserving (only the
+   queue tail is touched, and only when severely imbalanced), so it never scrambles a craft.
 
 ## Installation
 

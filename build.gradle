@@ -217,6 +217,13 @@ afterEvaluate {
 
 // Example for how to get properties into the manifest for reading at runtime.
 tasks.named('jar', Jar).configure {
+    // Alpha-stage marker: append "-alpha" to the artifact name so the pre-release status is
+    // visible in the filename (e.g. goddamnrepackager-0.3.0-alpha.jar). Controlled by the
+    // mod_is_alpha flag in gradle.properties. See TECHNICAL.md §5.
+    if (project.hasProperty('mod_is_alpha') && project.property('mod_is_alpha').toBoolean()) {
+        archiveClassifier = 'alpha'
+    }
+
     manifest {
         attributes([
                 'Specification-Title'     : mod_id,

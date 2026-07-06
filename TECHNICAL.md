@@ -69,9 +69,17 @@ queuedExitingPackages.addAll(boxesToExport);   // 源码 L134
 这是理包机把整理好的整批包裹塞进自己队列的那一瞬间。我们用 `@Redirect` 拦截这个
 `addAll` 调用，把"全塞给自己"改成"按负载均衡分给所有兄弟理包机"。
 
-### 2.2 核心算法：负载均衡分配（思路 A）
+### 2.2 核心算法：双层负载均衡（思路 A 快照分配 + 思路 B 动态再平衡）
 
-`@Redirect` 方法 `distributeAcrossRepackagers` 做三件事：
+模组用两层互补的机制实现并行：
+
+- **第一层（思路 A，快照分配）**：`@Redirect` 拦截 `attemptToRepackage` 里的 `addAll`，在 winner
+  repack 完成的那一刻，按各机当前队列深度把整批包切分到各私有队列。详见下方 ①②③。
+- **第二层（思路 B，动态再平衡）**：`@Inject` 挂在 `attemptToSend` 头部，每次理包机被 lazyTick 唤醒
+  （每 10 tick ≈ 0.5 秒）时，把"队列最深者"队尾的一小部分包偷给"队列最浅者"队尾。补上第一层
+  "分配完就静态"的弱点：即使某台理包机下游堵塞导致积压，空闲兄弟也能动态分担。详见 ④。
+
+第一层的 `@Redirect` 方法 `distributeAcrossRepackagers` 做三件事：
 
 **① 找到所有兄弟理包机**（`findAvailableSiblingRepackagers`）
 
@@ -108,10 +116,41 @@ for (int u = 0; u < total; u++) {
 它的 `queuedExitingPackages`。对非 winner 的 recipient 调用 `notifyUpdate()` 确保客户端
 播放发送动画。
 
+**④ 动态再平衡（思路 B，第二层）**
+
+第一层是"一次性快照"——分配完那一刻各机有多少活就定了。如果之后某台理包机下游堵塞（通向
+动力合成器的路径被堵），它的包发不出去，队列越积越长，而其它机器却空着，快照分配无能为力。
+
+第二层补这个缺口：`@Inject` 挂在 `attemptToSend` 头部，每次理包机被 lazyTick 唤醒（每 10 tick
+≈ 0.5 秒）时先做一次再平衡。再平衡分**两种模式**，严格保护订单顺序（见下），不会把合成打乱：
+
+- **堵塞恢复（优先）**：若检测到某台理包机"堵塞"——即 `heldBox` 非空但 `animationTicks == 0`（上个
+  包的发送动画早结束了，但下游没把它抽走，说明下游断了；见 §3.8 的被动清空协议）——则把它的队列
+  尾部**尽可能多地**搬给没堵塞且负载最低的兄弟，只留队首（tick 正在消费的那一个）。这绕过了下面的
+  保守阈值，因为堵塞机的负载**永远不会自己下降**。**不碰堵塞机的 `heldBox`**：那个在手上等下游的
+  包不在队列里，下游恢复后它会照常发出（所以堵塞机恢复后仍会输出 1 个 heldBox 里的包，这是物理下限）。
+- **保守均衡（正常）**：无人堵塞时，只有 `maxLoad > 2`（donor 确实积压）且 `maxLoad - minLoad > 1`
+  （严重失衡）才动手，每次只搬 `(max - min) / 2`（向下取整）——朝均衡方向收敛一步，不一次搬光，避免
+  每 0.5 秒反复抖动。
+
+两种模式共同遵守的订单顺序保护原则：
+
+- **只从 donor 队尾取**：tick 每次消费队首（`get(0)` 做 `count--`），再平衡**绝不碰队首**，donor
+  当前的发送节奏零干扰。即便 donor 队列只剩一个元素（队首=队尾），也只切分、不移除整个。堵塞恢复
+  模式同样如此——堵塞机也只清到剩队首 1 个。
+- **加到 receiver 队尾**：receiver 先发完自己原有的队首，再发新追加的，FIFO 顺序保持。
+
+> **"残留 3 个"问题（0.3.0 修复）**：早期版本只有保守均衡，被堵机的负载降到 2 时就被 `maxLoad <= 2`
+> 阈值卡住不再搬运，加上队首保护那 1 个，导致被堵机恢复后**总是输出恰好 3 个**（2 个阈值残留 + 1 个
+> 队首），与订单大小无关。引入堵塞检测后，被堵机队列被激进清空到只剩队首，残留降到 **1 个**（heldBox
+> 那个，物理下限）。
+
 ### 2.3 防物品复制/丢失
 
 - **不复制**：`count` 被切成互不相交的份额，每个包裹单元只进一个 recipient 的队列
 - **不丢失**：每个 `BigItemStack` 处理后检查 `assigned == total`，不等就打 `SPLIT MISMATCH` 警告
+- **再平衡守恒**：每次再平衡前后各算一次所有兄弟的 `pendingShipmentCount` 总和，必须相等（再平衡
+  只搬运、不增减），不等打 `REBALANCE MISMATCH` 警告
 - **不干扰原版碎片清理**：注入点在 L134（addAll）**之后于** L117-124（清空保险库里该 orderId
   的碎片）执行——其实 addAll 在清空之后，所以我们不动碎片逻辑，只动队列分配
 
@@ -260,30 +299,104 @@ Create 的 `CapManipulationBehaviourBase` 自己也有失效重建路径（`onHa
 > 后看 `[GDR-DIST] ... across N repackager(s)` 的 N。N 应等于实际理包机数；若仍偏小，
 > 问题在 flood-fill 漏扫而非身份匹配。
 
+### 3.8 【关键背景】发送状态机依赖 heldBox 被动清空协议
+
+**为什么记这一节**：设计思路 B（动态负载均衡）时，最初设想是拦截 `tick()` 的取件逻辑
+（`queuedExitingPackages.get(0)`）。字节码调研发现这条路风险极高，根因就是本节记录的协议。
+任何未来想动发送状态机的改动（包括 §4.2 的真·共享池）都必须先吃透这里。
+
+**tick 取件条件**（`PackagerBlockEntity.tick()`，Repackager 不重写、继承父类）：
+
+```
+if (animationTicks == 0 && !level.isClientSide
+    && !queuedExitingPackages.isEmpty() && heldBox.isEmpty()) {
+    BigItemStack bis = queuedExitingPackages.get(0);
+    heldBox = bis.stack.copy();
+    bis.count--;
+    if (bis.count <= 0) queuedExitingPackages.remove(0);
+    animationInward = false;
+    animationTicks = 20;   // CYCLE：1 包 / 20 tick（1 秒）
+    notifyUpdate();
+}
+```
+
+**heldBox 从不被理包机自己清空**。`PackagerBlockEntity` 全文中对 `heldBox` 的写入只有：构造时
+`EMPTY`、tick 取件时 `copy()`、`attemptToSend` 直发时赋新包、NBT 读入。**动画结束（`animationTicks`
+减到 0）那一拍只调 `wakeTheFrogs()` + `setChanged()`，不清 heldBox。**
+
+**heldBox 的清空是被动的**——靠下游库存通过 `PackagerItemHandler.extractItem` 抽走它：
+
+```
+PackagerItemHandler.extractItem(slot, amount, simulate):
+    if (animationTicks != 0) return EMPTY;        // 动画期间禁止抽
+    ItemStack local = blockEntity.heldBox;
+    if (!simulate) setStackInSlot(slot, EMPTY);   // ← 唯一的清空点
+    return local;
+
+setStackInSlot(slot, stack):
+    if (slot != 0) return;
+    blockEntity.heldBox = stack;                   // putfield heldBox
+    blockEntity.notifyUpdate();
+```
+
+**含义**：vanilla 的"连续发包"完全依赖"下游库存会主动从理包机槽位抽走 heldBox"。一旦下游抽不动
+（库存满、无下游），heldBox 卡住非空，`heldBox.isEmpty()` 永假，tick 取件死锁——但 vanilla 靠
+extractItem 兜底，所以正常场景下不会发生。
+
+**持续发包靠 lazyTick**（周期 10 tick ≈ 0.5 秒，`SmartBlockEntity` 默认 `setLazyTickRate(10)`）：
+`lazyTick` 在红石常开模式下每 0.5 秒调一次 `attemptToSend(null)`。`activate()`（红石上升沿）只在
+开机触发一次并设 `buttonCooldown=40`（2 秒退避），之后稳态发送频率 = lazyTick 周期。
+
+**对思路 B 的影响**：
+
+- **路径 ①（已采用，0.3.0）**：完全不动 tick / heldBox / extractItem。再平衡只在各机私有
+  `queuedExitingPackages` 之间搬队尾元素，发送状态机照原样跑。零死锁风险。
+- **路径 ②（真·共享池，未采用）**：若要建全局池、让 tick 从池取件，就必须接管 heldBox 生命周期
+  （下游 extractItem 协议被打断后需自己管 heldBox=EMPTY），死锁/物品复制风险高。这正是 §4.2 评估
+  30-40% 成功率的根因。
+
 ---
 
 ## 4. 后续开发方向
 
-### 4.1 思路 B：共享包裹池（动态负载均衡）
+### 4.1 动态负载均衡（思路 B）
 
-**当前思路 A 的局限**：分配是"一次性快照"——在 repack 完成那一刻决定谁分多少。
+**原思路 A 的局限**：分配是"一次性快照"——在 repack 完成那一刻决定谁分多少。
 如果之后有理包机空闲下来，它不会去别的理包机队列里"抢"活。
 
-**思路 B 的目标**：所有理包机共享一个"待发包裹池"，谁空了谁取下一个。真正的动态均衡。
+思路 B 的目标是让空闲理包机能动态分担忙碌理包机的积压。设计阶段评估了两条路径：
 
-**实现思路**：拦截 `PackagerBlockEntity.tick()` 里 L143-149 的取件逻辑
-（`queuedExitingPackages.get(0)`），改成从一个共享池取。
+#### 路径 ①：动态再平衡（已采用，0.3.0 实现）
 
-**为什么没做（风险评估）**：
-- `tick()` 是发送状态机的心脏，涉及 `heldBox` / `animationTicks` / 客户端动画同步
-- 共享池的并发安全（虽服务端单线程，但 BlockEntity tick 顺序仍需小心）
-- **物品复制/丢失风险极高**：发送逻辑被扰动后，最坏情况是"下单 60 收到 58"，排查极难
-- 调试成本：LLM无法自己跑游戏，全靠用户贴 log 迭代；深改动的调试周期不可控
+**思路**：不动发送状态机，只在 `attemptToSend` 头部加一道再平衡——每次理包机被 lazyTick 唤醒时，
+把"队列最深者"队尾的一小部分包偷给"队列最浅者"队尾。空闲理包机就能动态吃到原本堆在别机队列里的活。
 
-**评估成功率：30~40%。** 不建议在思路 A 已稳定可用的情况下贸然做。
+**为什么选它**：完全不碰 `tick()` / `heldBox` / `extractItem`（见 §3.8 的被动清空协议），零死锁风险；
+代码改动小、复用思路 A 的 sibling 发现与 count 切分；物品守卫容易做（再平衡前后总量守恒）。在"消除
+快照静态性"这一核心目标上效果与真·共享池几乎相当（玩家体感无别），风险却低一个数量级。
 
-**如果要做，建议**：在新分支上开发，思路 A 的 jar 作为保底；重点设计一个"发送计数器"
-机制，确保即使共享池出错，也能从计数差发现物品增减。
+**实现细节见 §2.2 ④**。订单顺序保护（队尾取、保守阈值、单轮收敛）见同节。
+
+#### 路径 ②：真·共享池（未采用，未来可能方向）
+
+**思路**：建一个 per-vault 全局 `SharedPackagePool`。winner repack 出来的整批**入共享池**（不入任何
+私有队列）。各理包机 `tick()` 取件时**从共享池取**，而不是从自己的 `queuedExitingPackages` 取。
+
+**实现要点**（若未来要做）：
+- 新建 `SharedPackagePool` 类：per-vault 队列 + NBT 序列化（区块卸载时池里没发的包不能丢）。
+- 改 `addAll` redirect：整批入共享池。
+- 新增第二个 mixin 拦父类 `PackagerBlockEntity.tick()` 的 `queuedExitingPackages.get(0)`，handler 内
+  `instanceof RepackagerBlockEntity` 早退（避免误伤普通打包机，因为 Repackager 不重写 tick）。
+- **接管 heldBox 生命周期**（最大风险）：共享池打断了"包先进私有队列再被 tick 取出"的路径，须自己
+  管理 `heldBox=EMPTY`，否则下游抽不动时 tick 取件死锁。
+
+**为什么 0.3.0 没做**：字节码调研（§3.8）发现 vanilla 连续发包依赖 heldBox 的被动清空协议，拦 tick
+取件会打断它，死锁/物品复制风险高——这正是原版 §4.1 估 30-40% 成功率的根因。路径 ① 已用低得多的
+风险达成接近的动态均衡效果，所以路径 ② 暂不实现。
+
+**如果未来要做，建议**：在新分支上开发，0.3.0 的 jar 作为保底；重点设计一个跨 tick 的"发送计数器"
+对账机制（池入量 vs 各机发出量），确保即使共享池出错，也能从计数差发现物品增减；优先解决 heldBox
+生命周期管理，这是成败关键。
 
 ### 4.2 其它可能方向
 
@@ -309,7 +422,10 @@ Create 的 `CapManipulationBehaviourBase` 自己也有失效重建路径（`onHa
    ./g.sh clean build      # 编译 + 打 jar
    ./g.sh runClient        # 启动开发环境游戏（含 Create + JEI）
    ```
-4. 发布 jar 在 `build/libs/goddamnrepackager-<version>.jar`
+4. 发布 jar 在 `build/libs/` 下。**alpha 阶段的 jar 带有 `-alpha` 后缀**，例如
+   `goddamnrepackager-0.3.0-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
+   通过给 `jar` 任务设 `archiveClassifier = 'alpha'` 实现）。脱离 alpha 后把 `mod_is_alpha` 改为
+   `false`，jar 名即变为 `goddamnrepackager-<version>.jar`。
 
 > `g.sh` 是必须的——直接 `./gradlew` 会用系统默认 Java（可能是 22），导致
 > `Unsupported class file major version 66` 错误。
@@ -330,9 +446,11 @@ Create 的 `CapManipulationBehaviourBase` 自己也有失效重建路径（`onHa
 
 ### 开启诊断日志
 
-在 `GodDamnRepackager.java` 里把 `DEBUG_LOGGING = true` 重新编译。开启后每次订单分配
-都会打印 `[GDR-DIST]` 行，显示：分配总量、distinct stack 数、参与理包机数、每个理包机
-分到的份额。`SPLIT MISMATCH` 警告始终开启（那是真错误）。
+在 `GodDamnRepackager.java` 里把 `DEBUG_LOGGING = true` 重新编译。开启后：
+- 每次订单快照分配打印 `[GDR-DIST]` 行：分配总量、distinct stack 数、参与理包机数、每个理包机
+  分到的份额。
+- 每次动态再平衡实际搬运时打印 `[GDR-REBAL]` 行：搬运的包裹单元数。
+- `SPLIT MISMATCH`（快照分配）和 `REBALANCE MISMATCH`（再平衡）警告始终开启（那是真错误）。
 
 ### 常见问题排查
 
@@ -340,6 +458,7 @@ Create 的 `CapManipulationBehaviourBase` 自己也有失效重建路径（`onHa
 |---|---|
 | Mixin 不触发，无报错 | MixinGradle 没配好，refmap 没生成（见 §3.1） |
 | `mixin class is invalid` | refmap 缺失或 target 描述符错（见 §3.1） |
-| 只有部分理包机工作 | ① 若用 0.2.0：老存档能力缓存代次不一致，**升级到 0.2.1** 即解决（见 §3.7）；② sibling finder 漏找（保险库太大？检查 flood-fill）。用 `DEBUG_LOGGING` 的 `across N repackager(s)` 的 N 区分：0.2.1 下 N 仍偏小则是 ② |
-| 产物数量不对 | 立即查 `SPLIT MISMATCH` 警告；检查 count 切分逻辑 |
+| 只有部分理包机工作 | ① 若用 0.2.0：老存档能力缓存代次不一致，**升级到 0.2.1+** 即解决（见 §3.7）；② sibling finder 漏找（保险库太大？检查 flood-fill）。用 `DEBUG_LOGGING` 的 `across N repackager(s)` 的 N 区分：0.2.1 下 N 仍偏小则是 ② |
+| 产物数量不对 | 立即查 `SPLIT MISMATCH` / `REBALANCE MISMATCH` 警告；前者查快照 count 切分，后者查再平衡搬运（见 §2.3） |
+| 下游堵塞时积压不消散 | 确认 0.3.0+（思路 B 再平衡 + 堵塞恢复已启用）；开 `DEBUG_LOGGING` 看 `[GDR-REBAL] STALLED-DONOR` 是否触发。堵塞机的队列应被清到只剩队首（恢复后只输出 heldBox 那 1 个，而非 3 个）。若堵塞机仍残留多个，检查 `isStalled` 判定（heldBox非空 && animationTicks==0） |
 | 游戏启动崩溃（打开仓库管理员时） | `@Inject` 参数类型和目标方法不匹配（见 §3.3） |
