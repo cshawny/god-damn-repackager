@@ -14,7 +14,7 @@
 
 # God Damn Repackager
 
-> **⚠️ ALPHA (0.3.0)**
+> **⚠️ ALPHA (0.4.0)**
 > This mod is in early testing. It uses a Mixin to modify Create's repackager core logic and
 > has not yet undergone large-scale, long-term stability testing. **Back up your world before
 > using it.** Bug reports are welcome on the project page.
@@ -59,16 +59,24 @@ parallelizes them. Repackagers must be placed against a Create **Vault**.
 
 ## How it works
 
-The mod uses two complementary layers:
+Instead of each repackager hoarding an entire order in its own send queue, **0.4.0 uses a per-vault shared
+package pool** (stored in the world save):
 
-1. **Snapshot allocation** — When a repackager assembles an order's packages, it would normally dump
-   the whole batch into its own send queue. The mod intercepts this and instead distributes the packages
-   across all repackagers on the same vault, weighted by current queue depth (shorter queue = more work).
-2. **Dynamic rebalancing** *(new in 0.3.0)* — Every ~0.5s, if one repackager is badly backlogged while
-   another is idle, a slice of the backlog is moved from the busy one's queue tail to the idle one's. So
-   even if one repackager's downstream path clogs, its work is picked up by idle siblings and overall
-   throughput isn't dragged down by a single stalled machine. Rebalancing is order-preserving (only the
-   queue tail is touched, and only when severely imbalanced), so it never scrambles a craft.
+- **Deposit** — when a repackager finishes assembling an order's packages, the whole batch goes into the
+  shared pool keyed by the vault it serves, rather than into its own private queue.
+- **Poll on demand** — every tick, each *idle* repackager pulls one package out of the pool into its own
+  queue, then ships it as normal. N repackagers genuinely ship N packages/second.
+- **Inherently dynamic** — because each repackager pulls work on demand, a stalled repackager (its
+  downstream clogged) simply stops polling and its work is naturally picked up by idle siblings. No
+  separate rebalance layer is needed.
+
+> **Note on breaking blocks (0.4.0):** the shared pool is saved with the world, independent of any block.
+> Breaking a repackager does **not** drop the packages still in the pool — they're kept safely in the save,
+> and placing the repackager back resumes processing (nothing is lost). Only when the **vault itself is
+> destroyed (block broken or wrench-removed)** are that vault's pooled packages dropped as item entities.
+> Reshaping a vault (adding/removing blocks to change its shape) does **not** drop the pool either — the pool
+> migrates to the new shape automatically and repackagers keep processing. Repackagers respect vanilla Create
+> redstone: they only work when powered.
 
 ## Installation
 
@@ -98,10 +106,14 @@ The mod uses two complementary layers:
   `InventoryIdentifier` value equality (for vaults: a `Bounds(BoundingBox)` record comparing only the
   multiblock's corner coordinates), which is stable across capability rebuilds. **Upgrading to 0.2.1 resolves
   this — no re-placement needed.** (Technical detail in TECHNICAL.md §3.7.)
-- The current implementation is "load-balanced snapshot allocation": at the moment a repackager
-  assembles an order's packages, it decides who gets what based on current queue depth. This is
-  sufficient for the vast majority of real cases; in extreme edge cases a repackager that goes
-  idle *after* allocation won't "steal" work from another's queue.
+- ~~The current implementation is "load-balanced snapshot allocation"...~~ **(0.3.0 added dynamic
+  rebalancing on top; 0.4.0 replaced both with a shared package pool)** — 0.4.0 deposits each
+  assembled batch into a per-vault shared pool that idle repackagers poll from on demand, giving the
+  same parallel/dynamic-balancing effect with simpler logic.
+- **Breaking a repackager does NOT drop the shared pool (0.4.0).** The pool is saved with the world,
+  not tied to the block. Breaking a repackager only drops the single package it was mid-shipping
+  (heldBox); packages still in the pool stay in the save and resume when the repackager is replaced —
+  nothing is lost. Only destroying/reshaping the vault itself drops that vault's pooled packages.
 - Repackagers must be attached to a Create Vault. Other containers (Crates, vanilla chests) are
   theoretically supported but not fully tested.
 

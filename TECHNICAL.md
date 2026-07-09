@@ -59,102 +59,76 @@ src/main/resources/
 
 ### 2.1 注入点
 
-唯一的注入点在 `RepackagerBlockEntity.attemptToRepackage(IItemHandler)` 方法内，
-目标行是：
+0.4.0 用四个注入点实现共享包裹池架构：
 
-```java
-queuedExitingPackages.addAll(boxesToExport);   // 源码 L134
+| 注入 | 方法 | 用途 |
+|---|---|---|
+| `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | 整批入池：winner repack 后不再塞进自己队列，而是 deposit 进共享池 |
+| `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`（注父类，因为 Repackager 不重写 tick） | 策略 A：空闲理包机每 tick 从池里 poll 1 个包灌进自己私有队列（须 `redstonePowered`） |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`（public，覆盖 break/wrench） | vault 销毁时 drop 池：把该 vault 的共享池清空并爆出实体 |
+| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`（public） | vault reshape 时迁移池 key：把旧 BoundingBox 的池迁到新 BoundingBox |
+
+> 为什么 tick 注入点在父类 `PackagerBlockEntity` 而非 `RepackagerBlockEntity`：
+> Repackager **不重写** `tick()`（字节码已确认，见 §3.9）。Mixin 解析目标方法时按目标类自身
+> 的方法表查找——Repackager 的方法表里没有 `tick`，所以 `@Mixin(Repackager.class) @Inject(method="tick")`
+> **无法注入**。唯一可行模式是注父类 `PackagerBlockEntity` + handler 内 `instanceof Repackager`
+> 早退（避免误伤普通打包机）。
+
+### 2.2 核心算法：共享包裹池（0.4.0 架构）
+
+0.3.0 的"快照分配 + 动态再平衡"两层机制已被 **共享包裹池** 架构彻底取代。核心数据结构是
+`SharedPackagePool`——一个世界级 `SavedData`，按保险库的 `BoundingBox` 为 key 存一个
+`Deque<BigItemStack>`。整个并行流程变成两步：
+
+```
+winner repack 整批
+   └─→ 共享池 (SavedData, 按 vault BoundingBox 分桶)        ← 整批入池(@Redirect addAll)
+         ↑
+         └─→ 每 tick,空闲理包机 poll 1 个 → 私有队列          ← 按需取(@Inject tick HEAD)
+               └─→ heldBox → 发送动画 → 下游 extractItem 清空  ← vanilla tick/extractItem,不动
 ```
 
-这是理包机把整理好的整批包裹塞进自己队列的那一瞬间。我们用 `@Redirect` 拦截这个
-`addAll` 调用，把"全塞给自己"改成"按负载均衡分给所有兄弟理包机"。
+**① 入池（@Redirect addAll）**
 
-### 2.2 核心算法：双层负载均衡（思路 A 快照分配 + 思路 B 动态再平衡）
+`attemptToRepackage` 末尾原版的 `queuedExitingPackages.addAll(boxesToExport)` 被 redirect 到
+`SharedPackagePool.deposit(vaultKey, batch)`。winner 整批**不进任何私有队列**，全存入共享池。
+winner 自己也只是个普通消费者——下个 tick 和兄弟平等地 poll。vault key 用
+`VaultIdentity.vaultBoundingBoxOf(self)`：从 `targetInventory.getIdentifiedInventory().identifier()` 取
+`InventoryIdentifier.Bounds.bounds()`（见 §3.7 的稳定标识原理）。
 
-模组用两层互补的机制实现并行：
+**② 按需取（@Inject tick HEAD，策略 A）**
 
-- **第一层（思路 A，快照分配）**：`@Redirect` 拦截 `attemptToRepackage` 里的 `addAll`，在 winner
-  repack 完成的那一刻，按各机当前队列深度把整批包切分到各私有队列。详见下方 ①②③。
-- **第二层（思路 B，动态再平衡）**：`@Inject` 挂在 `attemptToSend` 头部，每次理包机被 lazyTick 唤醒
-  （每 10 tick ≈ 0.5 秒）时，把"队列最深者"队尾的一小部分包偷给"队列最浅者"队尾。补上第一层
-  "分配完就静态"的弱点：即使某台理包机下游堵塞导致积压，空闲兄弟也能动态分担。详见 ④。
-
-第一层的 `@Redirect` 方法 `distributeAcrossRepackagers` 做三件事：
-
-**① 找到所有兄弟理包机**（`findAvailableSiblingRepackagers`）
-
-理包机贴在保险库（多方块结构）外围。要找到"同一保险库的所有理包机"，采用 flood-fill：
-1. 从 winner 理包机的位置出发，找到它连接的保险库方块
-2. 从该方块 flood-fill 整个保险库多方块结构（上限 200 块，防失控）
-3. 对每个保险库方块扫描 6 邻居，找出其中的 `RepackagerBlockEntity`
-4. 用 `InventoryIdentifier` 值相等（`equals`）确认兄弟理包机连的是同一个保险库。
-   对 vault 该标识是 `Bounds(BoundingBox)`，只比几何坐标，不受能力实例代次影响（详见 §3.7）
-
-> **为什么用 flood-fill 而不是固定半径扫描**：保险库可达 3×3×3 甚至更大，贴在对角的
-> 两个理包机距离可能 >2。早期版本用半径 2 扫描，导致 9 理包机场景只找到 3~5 个。
-
-**② 负载均衡切分**（贪心算法）
-
-`boxesToExport` 是 `List<BigItemStack>`，但**真正要发的包裹数是每个 `BigItemStack.count`
-的总和**（不是列表长度）。一个 60 合成的订单 = 1 个 `BigItemStack(count=60)`。
-
-对每个 `BigItemStack`，把它 `count` 个单元**逐个**分配给当前队列最短的理包机：
+这是关键的安全设计——**不碰 heldBox 生命周期**（§3.8）。每次 `tick()` 开始前先跑我们的注入：
 
 ```java
-for (int u = 0; u < total; u++) {
-    int best = 找当前 (currentLoad + share) 最小的 recipient;
-    share[best]++;
-}
+if (!(self instanceof RepackagerBlockEntity)) return;  // 不碰普通打包机
+if (animationTicks != 0) return;        // 动画中,不打扰
+if (!heldBox.isEmpty()) return;          // heldBox 还在(下游没抽走) → 堵塞,不取新包
+if (!queuedExitingPackages.isEmpty()) return;  // 私有队列还有残留,先消化
+pkg = pool.poll(vaultKey);               // 从池取 1 个(队首)
+if (pkg != null) queuedExitingPackages.add(pkg);  // 灌进私有队列尾部
+// ↓ vanilla tick() 紧接着从队首取它:
+//   heldBox = queue[0]; animationTicks = 20; ...
 ```
 
-这样队列更短的理包机（更闲）分到更多活，队列长的少分。`self`（winner）始终是候选之一，
-保证无兄弟时行为退化为原版。
+**为什么安全**：注入只在队列空、heldBox 空、无动画时往队列尾部加 1 个包，vanilla tick 紧接着从
+队首取它。私有队列始终 0~1 个元素，vanilla 取件逻辑看不到任何差异。heldBox 的被动清空协议
+（§3.8）一行没动——零死锁风险。堵塞机（`heldBox` 非空）被 `!heldBox.isEmpty()` 守卫天然挡住，
+不取新包，活自动流向空闲兄弟——**共享池天然就是动态均衡，不需要额外的再平衡逻辑**。
 
-**③ 分发 + 客户端同步**
+**③ count 语义（§3.5）**
 
-每个 recipient 拿到自己的 `share` 份额，构造新的 `BigItemStack(stack.copy(), share)` 加进
-它的 `queuedExitingPackages`。对非 winner 的 recipient 调用 `notifyUpdate()` 确保客户端
-播放发送动画。
-
-**④ 动态再平衡（思路 B，第二层）**
-
-第一层是"一次性快照"——分配完那一刻各机有多少活就定了。如果之后某台理包机下游堵塞（通向
-动力合成器的路径被堵），它的包发不出去，队列越积越长，而其它机器却空着，快照分配无能为力。
-
-第二层补这个缺口：`@Inject` 挂在 `attemptToSend` 头部，每次理包机被 lazyTick 唤醒（每 10 tick
-≈ 0.5 秒）时先做一次再平衡。再平衡分**两种模式**，严格保护订单顺序（见下），不会把合成打乱：
-
-- **堵塞恢复（优先）**：若检测到某台理包机"堵塞"——即 `heldBox` 非空但 `animationTicks == 0`（上个
-  包的发送动画早结束了，但下游没把它抽走，说明下游断了；见 §3.8 的被动清空协议）——则把它的队列
-  **彻底清空**（含队首）搬给没堵塞且负载最低的兄弟。这绕过了下面的保守阈值，因为堵塞机的负载**永远
-  不会自己下降**。堵塞期间 tick 不碰队列（字节码已验证：取件分支被 `heldBox.isEmpty()` 守卫挡住），
-  所以移除队首无并发竞争。**不碰堵塞机的 `heldBox`**：那个在手上等下游的包不在队列里，下游恢复后它
-  会照常发出（所以堵塞机恢复后仍会输出 1 个 heldBox 里的包，这是物理下限）。
-- **保守均衡（正常）**：无人堵塞时，只有 `maxLoad > 2`（donor 确实积压）且 `maxLoad - minLoad > 1`
-  （严重失衡）才动手，每次只搬 `(max - min) / 2`（向下取整）——朝均衡方向收敛一步，不一次搬光，避免
-  每 0.5 秒反复抖动。
-
-两种模式共同遵守的订单顺序保护原则：
-
-- **只从 donor 队尾取（保守模式）/ 可清空整个队列（堵塞模式）**：保守均衡模式绝不碰队首（tick 正在
-  消费它），即便 donor 只剩一个元素也只切分不移除。堵塞恢复模式则可清空整个队列含队首——因为堵塞期
-  tick 不碰队列，移除队首无竞争（见上）。两种模式下 receiver 都从队尾接收，FIFO 顺序保持。
-- **加到 receiver 队尾**：receiver 先发完自己原有的队首，再发新追加的，FIFO 顺序保持。
-
-> **"残留 3 个"问题（0.3.0 修复）**：早期版本只有保守均衡，被堵机的负载降到 2 时就被 `maxLoad <= 2`
-> 阈值卡住不再搬运，加上队首保护那 1 个，导致被堵机恢复后**总是输出恰好 3 个**（2 个阈值残留 + 1 个
-> 队首），与订单大小无关。引入堵塞检测后，被堵机队列被**彻底清空**（含队首——堵塞期间 tick 不碰队列，
-> 字节码已验证 `heldBox.isEmpty()` 守卫挡住了取件分支，移除队首无竞争），残留降到 **1 个**（heldBox
-> 那个"在手上等下游"的包，物理下限——要消掉它得动 heldBox 字段，会打断 tick 取件状态机，不做）。
+`BigItemStack.count` 是"该包裹要发几次"，不是"包裹有几个"。池里的 `poll()` 按此语义拆分：若队首
+`count > 1`，只拆出 1 份（`new BigItemStack(stack.copy(), 1)`），原 head 留在队首 `count--`。
+这样池里的 `BigItemStack` 逐次被消费完才移除，和 vanilla 队列的 count 语义一致。
 
 ### 2.3 防物品复制/丢失
 
-- **不复制**：`count` 被切成互不相交的份额，每个包裹单元只进一个 recipient 的队列
-- **不丢失**：每个 `BigItemStack` 处理后检查 `assigned == total`，不等就打 `SPLIT MISMATCH` 警告
-- **再平衡守恒**：每次再平衡前后各算一次所有兄弟的 `pendingShipmentCount` 总和，必须相等（再平衡
-  只搬运、不增减），不等打 `REBALANCE MISMATCH` 警告
-- **不干扰原版碎片清理**：注入点在 L134（addAll）**之后于** L117-124（清空保险库里该 orderId
-  的碎片）执行——其实 addAll 在清空之后，所以我们不动碎片逻辑，只动队列分配
+- **不复制**：整批 deposit 后只存在池里一份；poll 每次只拆出 1 份，count 严格递减
+- **不丢失**：共享池是 `SavedData`，区块卸载/重进存档都保留（不随 BlockEntity 销毁）
+- **vault 销毁/reshape 不吞包**：`ConnectivityHandlerMixin` 在 vault 销毁时 drainAndDrop，
+  池里的包全爆成实体（见 §3.9 的 vault-centric 归属模型）
+- **不干扰原版碎片清理**：redirect 的 addAll 在原版清空保险库碎片逻辑之后执行，碎片逻辑不动
 
 ---
 
@@ -297,9 +271,9 @@ Create 的 `CapManipulationBehaviourBase` 自己也有失效重建路径（`onHa
 此修复后，老存档安装 0.2.1 **无需重新放置理包机**。改动只影响"哪些理包机参与分配"这一判定，
 不触碰 count 切分、`BigItemStack` 分发、`SPLIT MISMATCH` 守卫——物品增减风险为零。
 
-> **诊断铁证**（仍适用于排查 sibling 漏找的其它成因，如 §3.6 的 flood-fill）：开启 `DEBUG_LOGGING`
-> 后看 `[GDR-DIST] ... across N repackager(s)` 的 N。N 应等于实际理包机数；若仍偏小，
-> 问题在 flood-fill 漏扫而非身份匹配。
+> **历史诊断（0.2.x 时代适用）**：0.3.0 用 `[GDR-DIST] ... across N repackager(s)` 的 N 排查 sibling
+> 漏找。**0.4.0 共享池架构不再有 sibling 发现**（每机独立从池 poll），此诊断已不适用。若 0.4.0 下仍
+> 有"部分理包机不工作"，查 `vaultBoundingBoxOf` 是否对这些机返回 null（targetInventory 未就绪）。
 
 ### 3.8 【关键背景】发送状态机依赖 heldBox 被动清空协议
 
@@ -351,11 +325,124 @@ extractItem 兜底，所以正常场景下不会发生。
 
 **对思路 B 的影响**：
 
-- **路径 ①（已采用，0.3.0）**：完全不动 tick / heldBox / extractItem。再平衡只在各机私有
-  `queuedExitingPackages` 之间搬队尾元素，发送状态机照原样跑。零死锁风险。
-- **路径 ②（真·共享池，未采用）**：若要建全局池、让 tick 从池取件，就必须接管 heldBox 生命周期
-  （下游 extractItem 协议被打断后需自己管 heldBox=EMPTY），死锁/物品复制风险高。这正是 §4.2 评估
-  30-40% 成功率的根因。
+- **路径 ①（0.3.0 采用，0.4.0 已废弃）**：完全不动 tick / heldBox / extractItem。再平衡只在各机私有
+  `queuedExitingPackages` 之间搬队尾元素，发送状态机照原样跑。零死锁风险。0.4.0 用共享池取代了它。
+- **路径 ②（真·共享池，0.4.0 已采用）**：原 §4.1 估计拦 tick 取件要接管 heldBox 生命周期、风险高。
+  0.4.0 用**策略 A（tick HEAD 灌队列）**规避了这个风险——不拦 tick 的 `get(0)` 取件行，而是在 tick
+  HEAD 往私有队列尾部加包，vanilla tick 照常从队首取。heldBox 生命周期一行没动，零死锁。详见 §3.9、§4.1。
+
+### 3.9 【0.4.0 核心陷阱】共享池脱离 BlockEntity → vault-centric 归属 + 三个 mixin 陷阱
+
+0.4.0 把包从"各理包机私有 `queuedExitingPackages`"搬到"世界级 `SharedPackagePool`(SavedData)"。这个
+架构转变带来七个必须吃透的陷阱，每一个都踩过/差点踩过。
+
+**① tick 必须注父类 `PackagerBlockEntity`，不能注 `RepackagerBlockEntity`**
+
+字节码确认 Repackager **不重写** `tick()`（继承父类）。Mixin 解析目标方法时按目标类自身的方法表查找，
+Repackager 的方法表里没有 `tick`，所以 `@Mixin(Repackager.class) @Inject(method="tick")` **无法注入**
+（annotation processor 会报 "Unable to locate target tick"）。唯一可行模式：
+
+```java
+@Mixin(value = PackagerBlockEntity.class, remap = false)  // 注父类
+@Inject(method = "tick()V", at = @At("HEAD"))
+private void feedFromPool(CallbackInfo ci) {
+    if (!(((Object)this) instanceof RepackagerBlockEntity)) return;  // 早退,不误伤普通打包机
+    ...
+}
+```
+
+所有新 mixin 都要 `remap = false`：注入的是 Create/Minecraft 自身方法（official mapping 下名字就是
+字面名），不需要 searge refmap 重映射。不加 `remap = false`，annotation processor 会报
+"Unable to locate obfuscation mapping for @Inject target tick"。
+
+**② vault 销毁钩子：注 public `splitMulti`，不能注 private `splitMultiAndInvalidate`**
+
+vault 销毁/reshape 的通用 chokepoint 是 `ConnectivityHandler.splitMultiAndInvalidate`（ItemVaultBlock.
+onRemove / onWrenched / tryToFormNewMulti 都走它），但它有两个可见性障碍使其**无法从 mixin 注入**：
+
+- 方法是 `private static`。
+- 第二个参数 `SearchCache<T>` 是 **package-private**（`class` 非 `public`）→ 我们的代码**无法 import** 它。
+
+**踩过的坑**：初版试图"只捕获第一个 `BlockEntity` 参数、跳过 SearchCache"来绕过可见性。**这是错的**——
+Mixin 的 `@Inject` handler **必须匹配目标方法的完整参数列表**（可省略尾部参数，但不能跳过中间的）。
+运行时报 `InvalidInjectionException: Expected (BlockEntity;SearchCache;Z;CallbackInfo;)V but found
+(BlockEntity;CallbackInfo;)V`，游戏进世界即崩。那条 "Cannot find target method" 的 AP **警告不是良性
+的**——它反映的是 AP 无法验证 private+package-private 方法，但运行时 Mixin 一样无法注入。
+
+**正确的解法**：改注 **public `splitMulti(T)`**（break/wrench 的公开入口，擦除后参数只有一个 BlockEntity，
+handler 用 `(BlockEntity, CallbackInfo)` 即可）。它不覆盖 add-block reshape（reshape 走内部的
+`splitMultiAndInvalidate`，不经 `splitMulti`）——reshape 由**第四个 mixin**（`ItemVaultBlockEntityMixin`
+注 `notifyMultiUpdated`）单独处理，见 §3.9⑥。
+
+**③ `isController()` 在 teardown 后是 footgun**
+
+`isController()` 返回 `controller == null`。`removeController()` 会 null 掉 controller 字段，于是 teardown
+后每个 part 都谎报自己是 controller。**绝不能用 `isController()` 做 teardown 时的 controller 判定**。
+正确做法：用 `getControllerBE()`（在 HEAD 时 controller 字段还没被 null，返回真实 controller）。已在
+`ConnectivityHandlerMixin` 里这么做。
+
+**④ vault-centric 归属：打掉理包机不爆，打掉/扩建 vault 才爆**
+
+共享池存在 SavedData 里，与 BlockEntity 独立。这导致一个根本行为变化（README/PUBLISH 已告知玩家）：
+
+- **打掉理包机** → vanilla `destroy()` 只 drop `heldBox` + 私有 `queuedExitingPackages`（此时基本是空的，
+  因为策略 A 下私有队列只 0~1 元素）。**共享池不爆**，包安全留 SavedData，重放理包机即恢复。
+- **打掉 vault（任意方块）/ 扳手拆除** → `ConnectivityHandlerMixin`（注 public `splitMulti`）触发
+  `drainAndDrop`，该 vault 的池全爆成实体。
+- **扩建 vault（reshape，加/减方块但不全拆）** → `ItemVaultBlockEntityMixin`（注 `notifyMultiUpdated`）
+  把池 key 从旧 BoundingBox **迁移**到新 BoundingBox，包不爆不丢，理包机继续从新 key 取（见 §3.9⑥）。
+
+**重建 BoundingBox 必须用 `initCapability()` 的精确公式**，不能用 `getInvId()`（`invId` 字段在能力首次
+查询前是 null）：vault 轴是 X 或 Z（不会是 Y），`box = fromCorners(pos, axis==Z ? pos.offset(r,r,l) : pos.offset(l,r,r))`，
+其中 pos = controller 的 worldPosition，r = getWidth()，l = getHeight()。已在 `ConnectivityHandlerMixin` 里实现。
+
+**⑤ mixin 类里不能有 public/static 普通方法（运行时崩溃）**
+
+**症状**：游戏启动崩溃，`InvalidMixinException: Mixin ... contains non-private static method vaultBoundingBoxOf(...)`
+，`checkMethodVisibility` 报错。
+
+**根因**：mixin 类的方法会被**合并进目标类**。0.4.0 初版把 `vaultBoundingBoxOf` 声明成
+`RepackagerBlockEntityMixin` 的 `public static` 方法，想让另一个 mixin（`PackagerBlockEntityMixin`）调用它。
+但 Mixin transformer 拒绝把非 private 的 static 方法合并进目标类（会污染 `RepackagerBlockEntity` 的 API 表面）。
+
+**修复**：共享 helper 必须放**独立工具类**（非 mixin），不能放 mixin 类里。`vaultBoundingBoxOf` 已搬到
+`com.github.goddamnrepackager.VaultIdentity`（普通 Java 类），两个 mixin 都调用 `VaultIdentity.vaultBoundingBoxOf(r)`。
+mixin 类里的 helper 方法必须是 `private`（实例方法），跨 mixin 共享的逻辑一律抽到独立类。
+
+**⑥ reshape 迁移：`notifyMultiUpdated()` 是 reshape 的唯一 public 钩子**
+
+`splitMulti` 不覆盖 reshape（reshape 走私有 `splitMultiAndInvalidate`，不经 `splitMulti`），所以扩建 vault
+（3×3×3 → 3×3×4）时旧 BoundingBox key 会变孤儿——池里的包匹配不上新形状，理包机取不到（表现为"订单
+卡住，拆回原形状又恢复"）。
+
+**解法**：注 public `ItemVaultBlockEntity.notifyMultiUpdated()`（`()V`，无参，易注入）。字节码确认它在
+reshape 路径（`tryToFormNewMulti`）里 `setWidth(newWidth)/setHeight(newLength)` **之后**调用（offset 202），
+所以 HEAD 时 `getWidth()/getHeight()/getMainConnectionAxis()/getBlockPos()` 反映**新**几何。它也在 fresh
+formation 时触发，所以用"last-known box 变化"判定 reshape：
+
+- `VaultBoxTracker`（独立工具类，`WeakHashMap<ItemVaultBlockEntity, BoundingBox>`）记录每个 controller 的
+  last-known box。WeakHashMap 在 BE 被 GC 时自动清理。
+- `notifyMultiUpdated` HEAD：算 newBox = `boxOf(self)`；若 `lastBox(self)` 存在且 ≠ newBox，调
+  `SharedPackagePool.migrateKey(oldBox, newBox)`（把 deque 原样搬到新 key，FIFO/count 不变，不 drop）；
+  然后 `remember(self, newBox)` 更新基线。首次（无 oldBox）只 remember，不 migrate。
+- teardown（`splitMulti` HEAD）时 `forget(vault)` 清掉追踪条目，避免陈旧基线。
+
+**关键**：`notifyMultiUpdated` 在 fresh formation 时会对每个 part 也调用，但只有 controller 持有真实多方块
+几何（`radius>1 || length>1`），part 的 box 是单方块位置——所以用 `isController()` + 几何大小守卫过滤。
+
+**⑦ tick HEAD 灌队列必须守 redstone，否则理包机无需红石也能工作**
+
+**症状**：理包机没有红石信号也在发包，违反机械动力原版设计。
+
+**根因**：vanilla `tick()` **本身没有红石检查**——它只从 `queuedExitingPackages` 取包发包。vanilla 靠
+`lazyTick()` 的 GATE 1（`if (!redstonePowered) return`）守住：只有红石充能时 `attemptToSend` 才会往队列
+塞包。但我们的 `PackagerBlockEntityMixin.feedFromPool` 在 tick HEAD **直接往队列灌包**，绕过了 lazyTick 的
+红石门，所以 tick 照常取包发包，无视红石。
+
+**修复**：在 `feedFromPool` 顶部加 `if (!self.redstonePowered) return;`。`redstonePowered` 是
+`PackagerBlockEntity` 的 public 字段（vanilla lazyTick GATE 1 读的就是它）。`redstoneModeActive()` 不是
+正确的门——Repackager 把它 override 成恒 `true`（那是"模式选择器"，不是红石门）。deposit（redirect）
+不受影响——它发生在已被 lazyTick 红石门守住的 `attemptToSend` 路径里。
 
 ---
 
@@ -363,42 +450,46 @@ extractItem 兜底，所以正常场景下不会发生。
 
 ### 4.1 动态负载均衡（思路 B）
 
-**原思路 A 的局限**：分配是"一次性快照"——在 repack 完成那一刻决定谁分多少。
-如果之后有理包机空闲下来，它不会去别的理包机队列里"抢"活。
+**原思路 A 的局限**：0.3.0 的快照分配是"一次性快照"——在 repack 完成那一刻决定谁分多少，再靠
+动态再平衡补静态性。两层逻辑各自有阈值、有 sibling 发现、有守恒校验，代码复杂。
 
-思路 B 的目标是让空闲理包机能动态分担忙碌理包机的积压。设计阶段评估了两条路径：
+思路 B 评估了两条路径，最终 0.4.0 实现了路径 ②（真·共享池）。
 
-#### 路径 ①：动态再平衡（已采用，0.3.0 实现）
+#### 路径 ①：动态再平衡（0.3.0 实现，0.4.0 已废弃）
 
-**思路**：不动发送状态机，只在 `attemptToSend` 头部加一道再平衡——每次理包机被 lazyTick 唤醒时，
-把"队列最深者"队尾的一小部分包偷给"队列最浅者"队尾。空闲理包机就能动态吃到原本堆在别机队列里的活。
+**思路**：不动发送状态机，只在 `attemptToSend` 头部加一道再平衡——把"队列最深者"队尾的一小部分包
+偷给"队列最浅者"队尾。空闲理包机就能动态吃到原本堆在别机队列里的活。
 
-**为什么选它**：完全不碰 `tick()` / `heldBox` / `extractItem`（见 §3.8 的被动清空协议），零死锁风险；
-代码改动小、复用思路 A 的 sibling 发现与 count 切分；物品守卫容易做（再平衡前后总量守恒）。在"消除
-快照静态性"这一核心目标上效果与真·共享池几乎相当（玩家体感无别），风险却低一个数量级。
+**为什么 0.3.0 选它**：完全不碰 `tick()` / `heldBox` / `extractItem`（§3.8 被动清空协议），零死锁风险。
 
-**实现细节见 §2.2 ④**。订单顺序保护（队尾取、保守阈值、单轮收敛）见同节。
+**0.4.0 为什么废弃**：路径 ②（共享池）用更低复杂度达成了相同效果（天然动态均衡，无需再平衡层）。
+路径 ① 的快照分配 + 保守阈值 + 堵塞恢复 + sibling flood-fill 全部删除，代码大幅精简。
 
-#### 路径 ②：真·共享池（未采用，未来可能方向）
+#### 路径 ②：真·共享池（0.4.0 已实现）
 
-**思路**：建一个 per-vault 全局 `SharedPackagePool`。winner repack 出来的整批**入共享池**（不入任何
-私有队列）。各理包机 `tick()` 取件时**从共享池取**，而不是从自己的 `queuedExitingPackages` 取。
+**思路**：per-vault 全局 `SharedPackagePool`（SavedData）。winner repack 的整批**入共享池**，各理包机
+`tick()` 时从池里 poll。
 
-**实现要点**（若未来要做）：
-- 新建 `SharedPackagePool` 类：per-vault 队列 + NBT 序列化（区块卸载时池里没发的包不能丢）。
-- 改 `addAll` redirect：整批入共享池。
-- 新增第二个 mixin 拦父类 `PackagerBlockEntity.tick()` 的 `queuedExitingPackages.get(0)`，handler 内
-  `instanceof RepackagerBlockEntity` 早退（避免误伤普通打包机，因为 Repackager 不重写 tick）。
-- **接管 heldBox 生命周期**（最大风险）：共享池打断了"包先进私有队列再被 tick 取出"的路径，须自己
-  管理 `heldBox=EMPTY`，否则下游抽不动时 tick 取件死锁。
+**0.4.0 的关键决策——策略 A（tick HEAD 灌队列）取代策略 B（拦 get(0)）**：
 
-**为什么 0.3.0 没做**：字节码调研（§3.8）发现 vanilla 连续发包依赖 heldBox 的被动清空协议，拦 tick
-取件会打断它，死锁/物品复制风险高——这正是原版 §4.1 估 30-40% 成功率的根因。路径 ① 已用低得多的
-风险达成接近的动态均衡效果，所以路径 ② 暂不实现。
+原 §4.1 设想的"拦 `tick()` 里 `queuedExitingPackages.get(0)`、池直接成取件源"（策略 B）需要接管
+heldBox 生命周期（§3.8），死锁/复制风险高——这正是原版估 30-40% 成功率的根因。0.4.0 字节码调研
+（§3.8 已补全）后发现，**只要取包点放在 tick HEAD 而非 get(0)**，就能完全不碰 heldBox 生命周期：
 
-**如果未来要做，建议**：在新分支上开发，0.3.0 的 jar 作为保底；重点设计一个跨 tick 的"发送计数器"
-对账机制（池入量 vs 各机发出量），确保即使共享池出错，也能从计数差发现物品增减；优先解决 heldBox
-生命周期管理，这是成败关键。
+- **策略 A**：`@Inject` 挂 tick HEAD，空闲时往私有队列尾部 add 1 个包；vanilla tick 紧接着从队首取。
+  私有队列 0~1 元素，heldBox 协议不动，**零死锁**。
+- **策略 B**（原设想，未采用）：`@Redirect` 拦 get(0)，池成取件源；须接管 heldBox 生命周期。风险高。
+
+两种策略玩家体感几乎无别（都是空闲机动态取活），但策略 A 风险低一个数量级。**偏离原 §4.1 字面描述
+是刻意的**——字节码已摸透 heldBox 被动清空协议，没必要走高危路。
+
+**0.4.0 还要解决的独有问题——vault-centric 归属（§3.9 详述）**：共享池脱离 BlockEntity 存在
+（SavedData），所以"打掉理包机"不会爆池（池留着，重放即恢复），但"打掉/扩建 vault"必须把池爆出来，
+否则包静默吞没。解法是第三个 mixin：`@Inject` `ConnectivityHandler.splitMultiAndInvalidate`，
+在 vault 销毁/reshape 时 drainAndDrop。
+
+**实现细节见 §2.2**。三个注入点（addAll redirect / tick inject / splitMultiAndInvalidate inject）
+见 §2.1。
 
 ### 4.2 其它可能方向
 
@@ -425,7 +516,7 @@ extractItem 兜底，所以正常场景下不会发生。
    ./g.sh runClient        # 启动开发环境游戏（含 Create + JEI）
    ```
 4. 发布 jar 在 `build/libs/` 下。**alpha 阶段的 jar 带有 `-alpha` 后缀**，例如
-   `goddamnrepackager-0.3.0-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
+   `goddamnrepackager-0.4.0-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
    通过给 `jar` 任务设 `archiveClassifier = 'alpha'` 实现）。脱离 alpha 后把 `mod_is_alpha` 改为
    `false`，jar 名即变为 `goddamnrepackager-<version>.jar`。
 
@@ -449,10 +540,11 @@ extractItem 兜底，所以正常场景下不会发生。
 ### 开启诊断日志
 
 在 `GodDamnRepackager.java` 里把 `DEBUG_LOGGING = true` 重新编译。开启后：
-- 每次订单快照分配打印 `[GDR-DIST]` 行：分配总量、distinct stack 数、参与理包机数、每个理包机
-  分到的份额。
-- 每次动态再平衡实际搬运时打印 `[GDR-REBAL]` 行：搬运的包裹单元数。
-- `SPLIT MISMATCH`（快照分配）和 `REBALANCE MISMATCH`（再平衡）警告始终开启（那是真错误）。
+- 每次入池打印 `[GDR-POOL] deposited N package(s)` 行：理包机整理后整批入池的总量。
+- 每次空闲理包机取包打印 `[GDR-POOL] fed 1 package` 行：哪个理包机取了包、池里还剩多少。
+- 每次 vault 销毁/reshape 爆池打印 `[GDR-POOL] drained & dropped N package(s)` 行。
+- （0.3.0 的 `[GDR-DIST]` / `[GDR-REBAL]` / `SPLIT MISMATCH` / `REBALANCE MISMATCH` 已随快照+再平衡
+  逻辑删除，0.4.0 不再出现。）
 
 ### 常见问题排查
 
@@ -460,7 +552,14 @@ extractItem 兜底，所以正常场景下不会发生。
 |---|---|
 | Mixin 不触发，无报错 | MixinGradle 没配好，refmap 没生成（见 §3.1） |
 | `mixin class is invalid` | refmap 缺失或 target 描述符错（见 §3.1） |
-| 只有部分理包机工作 | ① 若用 0.2.0：老存档能力缓存代次不一致，**升级到 0.2.1+** 即解决（见 §3.7）；② sibling finder 漏找（保险库太大？检查 flood-fill）。用 `DEBUG_LOGGING` 的 `across N repackager(s)` 的 N 区分：0.2.1 下 N 仍偏小则是 ② |
-| 产物数量不对 | 立即查 `SPLIT MISMATCH` / `REBALANCE MISMATCH` 警告；前者查快照 count 切分，后者查再平衡搬运（见 §2.3） |
-| 下游堵塞时积压不消散 | 确认 0.3.0+（思路 B 再平衡 + 堵塞恢复已启用）；开 `DEBUG_LOGGING` 看 `[GDR-REBAL] STALLED-DONOR` 是否触发。堵塞机的队列应被彻底清空（恢复后只输出 heldBox 那 1 个，物理下限）。若堵塞机仍残留多个，检查 `isStalled` 判定（heldBox非空 && animationTicks==0） |
+| 进世界崩溃 `InvalidInjectionException`（Expected ...SearchCache... but found） | 0.4.0：注了 private `splitMultiAndInvalidate` 且 handler 跳过了 SearchCache 参数。Mixin 要求 handler 匹配目标完整参数列表。改注 public `splitMulti`（见 §3.9②） |
+| 游戏启动崩溃 `non-private static method`（checkMethodVisibility） | 0.4.0：mixin 类里有 public/static 普通方法。共享 helper 必须放独立工具类（见 §3.9⑤） |
+| 游戏启动崩溃（tick） | 0.4.0：tick 注入点写错（必须注父类 PackagerBlockEntity + instanceof 守卫，见 §3.9①） |
+| 理包机无需红石也工作 | 0.4.0：tick HEAD 灌队列漏了红石守卫。加 `if (!self.redstonePowered) return;`（见 §3.9⑦） |
+| 扩建 vault 后订单卡住（拆回又恢复） | 0.4.0：reshape 没迁移池 key，旧 BoundingBox 变孤儿。需注 `notifyMultiUpdated` 迁移（见 §3.9⑥） |
+| 只有部分理包机工作 | 0.4.0 下应是历史问题：① 若用 0.2.0 升级到 0.2.1+（见 §3.7）。② 0.4.0 共享池架构不依赖 sibling 发现，每机独立 poll，不应再有此问题；若仍有，查 `vaultBoundingBoxOf` 是否返回 null（targetInventory 未就绪） |
+| 产物数量不对 | 0.4.0：开 `DEBUG_LOGGING` 看 `[GDR-POOL] deposited` 总量是否 == 订单数，`fed` 累计是否 == deposited。共享池是纯搬运+count 拆分，不等说明 poll/deposit 逻辑错（见 §2.3） |
+| 下游堵塞时积压不消散 | 确认 0.4.0+。堵塞机被 `!heldBox.isEmpty()` 守卫挡住不取新包，活自动流向空闲兄弟（共享池天然均衡）。开 DEBUG 看 `[GDR-POOL] fed` 是否只出现在非堵塞机 |
+| 打掉理包机后包裹"消失" | 这不是 bug——共享池跟着存档走，包裹在池里，重放理包机即恢复（见 §3.9④）。只有打掉/扳手拆除 vault 才爆池；扩建 vault 会迁移 key（不爆） |
+| 打掉/扩建 vault 后包裹没爆出来 | `ConnectivityHandlerMixin` 没注入成功（看启动日志有无 splitMulti 相关报错），或 `getControllerBE()` 返回 null（HEAD 时 controller 已被 null，见 §3.9③） |
 | 游戏启动崩溃（打开仓库管理员时） | `@Inject` 参数类型和目标方法不匹配（见 §3.3） |

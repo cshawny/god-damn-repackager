@@ -28,3 +28,6 @@ forge*changelog.txt
 *.log
 crash-reports/
 *.java.bak
+
+# ZCode (AI coding agent) local working files
+.zcode/
