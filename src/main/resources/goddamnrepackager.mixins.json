@@ -5,7 +5,10 @@
   "compatibilityLevel": "JAVA_17",
   "refmap": "goddamnrepackager.refmap.json",
   "mixins": [
-    "RepackagerBlockEntityMixin"
+    "RepackagerBlockEntityMixin",
+    "PackagerBlockEntityMixin",
+    "ConnectivityHandlerMixin",
+    "ItemVaultBlockEntityMixin"
   ],
   "client": [],
   "injectors": {
