@@ -87,6 +87,10 @@ package pool** (stored in the world save):
 > **Upgrading from 0.2.0?** Just replace the jar. 0.2.0 used to require re-placing repackagers in an
 > existing world; **0.2.1 fixed this** — no re-placement needed after upgrade. See
 > [Known Limitations](#known-limitations).
+>
+> **Upgrading from 0.3.x?** Just replace the jar. 0.4.0 replaces the internal balancing architecture
+> with a shared package pool — player-facing behavior is the same (N repackagers ≈ N× speed), just
+> more robust. No re-placement needed.
 
 ## Compatibility
 
@@ -113,7 +117,9 @@ package pool** (stored in the world save):
 - **Breaking a repackager does NOT drop the shared pool (0.4.0).** The pool is saved with the world,
   not tied to the block. Breaking a repackager only drops the single package it was mid-shipping
   (heldBox); packages still in the pool stay in the save and resume when the repackager is replaced —
-  nothing is lost. Only destroying/reshaping the vault itself drops that vault's pooled packages.
+  nothing is lost. Only destroying the vault itself (breaking a block or wrench-removing) drops that
+  vault's pooled packages. Reshaping a vault (adding/removing blocks) does NOT drop — the pool migrates
+  to the new shape and processing continues.
 - Repackagers must be attached to a Create Vault. Other containers (Crates, vanilla chests) are
   theoretically supported but not fully tested.
 
