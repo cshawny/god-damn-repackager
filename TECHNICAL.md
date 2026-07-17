@@ -502,6 +502,69 @@ heldBox 生命周期（§3.8），死锁/复制风险高——这正是原版估
 - **Create 版本跟进**：Create 更新后，`attemptToRepackage` 的行号 / `addAll` 的
   target 描述符可能变化。需要针对新版本重新验证注入点。
 
+### 4.3 【已挂起】部分重组（让理包机在部分材料到达时即开工）
+
+**状态：需求有价值，但实现连续踩了三个坑，已回退挂起。本节如实记录全过程，供未来重做参考。**
+
+**目标**：原版 `isOrderComplete` 是 all-or-nothing 闸门（碎片网格不全即 false）。碎片经运输网络
+异步流式到达，大订单"等最后一片"窗口长。希望让理包机在已到碎片够合成至少一次时就开工。
+
+**三次失败尝试**：
+
+#### 尝试 1（直接用 repackBasedOnRecipes 输出）— 物品复制 + 无限堆积
+
+**做法**：`@Inject` `attemptToSend` HEAD，扫描保险库碎片 → 调 `repackBasedOnRecipes` 生成合成包裹 →
+自己扣减碎片 NBT → deposit 共享池。
+
+**症状**：停掉运输链动力后，理包机输出"含大量铁锭、发往输入保险库的包裹"，且工作异常、物品复制。
+
+**根因**（三层叠加）：
+1. `repackBasedOnRecipes` 输出是**孤儿碎片格式**（随机 orderId、无 address、带 Fragment tag）。
+   `setOrder` 无条件写 Fragment tag。
+2. 孤儿 box 被理包机外抽后，因无 address 被路由**回到输入保险库** → `addPackageFragment` 收下 →
+   `isOrderComplete` 因随机 orderId 永远 false → 无限堆积。
+3. 自己改库存 NBT 绕过 `VersionedInventoryWrapper` 版本号自增 → 库存快照不同步 → 重复处理 = 复制。
+
+**教训**：`repackBasedOnRecipes` 的输出是 `repack()` 的中间产物，不能直接用。合成必须走完整 `repack()`
+（它做 addAddress + 一致 orderId + 余料 fallback）。
+
+#### 尝试 2（拦 addPackageFragment 返回值 + 复用原版 repack）— 触发过早
+
+**做法**：用只读探针验证了拓扑隔离成立（repack 输出 box 带 address，不回流输入保险库）后，
+`@Inject` `addPackageFragment` RETURN：返回 -1 时，调 `repackBasedOnRecipes` 判断"够不够合成"，
+够则覆盖返回值为 orderId → 触发原版 `attemptToRepackage` 的 repack 路径。
+
+**症状**：产物数量严重不符——下单 3 组铁块只出 2 组，10 组只出 3 组，"丢得越来越多"。
+
+**根因**：`attemptToRepackage` 扫描循环逐个 slot 调 `addPackageFragment`。我的 `@Inject RETURN`
+在**第一次**某 orderId 碎片进来、判断"够合成"后立即 `setReturnValue(orderId)` → 扫描循环
+offset 108-113 立即 **break**。于是 `collectedPackages` 只收到 **1 个**碎片。
+但原版 repack 后的第二轮 extract（offset 147-217）删除**保险库里所有** `getOrderId==orderId`
+的碎片。**repack 只消耗 1 片，extract 删了 N 片 → 丢失 N-1 片的内容物**。
+
+**教训**：必须保证 `repack 消耗的碎片集合 == extract 删除的碎片集合`。在 `addPackageFragment`
+层面触发，无法控制 collectedPackages 收齐所有碎片（扫描循环会被 break 打断）。
+
+#### 尝试 3（未实现，分析阶段放弃）— 拟改注入 attemptToRepackage
+
+**设想**：换注入点到 `attemptToRepackage`，扫描保险库把所有同 orderId 碎片塞进 `collectedPackages`
+后再触发 repack。但分析后发现仍有未验证细节（多机并发谁塞料、塞料与保险库实时状态的一致性、
+repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，**暂停实现，挂起需求**。
+
+**为什么这个需求这么难**：Create 的碎片/repack 机制有三个微妙耦合——
+- `isOrderComplete` 是 all-or-nothing 闸门，部分触发必然打破它隐含的"一次性全处理"语义；
+- `repack` 消耗 `collectedPackages`，但 extract 删保险库，两者集合必须手动保证相等；
+- 合成结果 box 带 Fragment，安全靠拓扑隔离（不回输入保险库），任何扰动都可能打破。
+
+**未来重做的建议**：
+1. **先用只读探针验证每一个假设**（像 §2.4 那次验证拓扑隔离一样），不要凭字节码推理直接写代码。
+2. **核心要解决"repack 消耗 == extract 删除"**：最可能的路径是在 `attemptToRepackage` 扫描循环
+   **结束后**（completedOrderId 仍 -1 时）主动塞料 + 触发，而非在 `addPackageFragment` 单次调用触发。
+3. **多机并发是独立难题**：需要 per-tick 去重，避免多机重复处理同一订单。
+
+**当前状态**：模组停留在 0.4.0（共享池），部分重组未实现。jar 名仍为
+`goddamnrepackager-0.4.0-alpha.jar`。
+
 ---
 
 ## 5. 开发环境复现
