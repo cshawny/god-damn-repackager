@@ -1,6 +1,12 @@
 modLoader="javafml"
-loaderVersion="${loader_version_range}"
+loaderVersion="${neo_version_range}"
 license="${mod_license}"
+
+# NeoForge mixin registration. NeoForge no longer reads the old `MixinConfigs` jar
+# manifest attribute; instead it discovers mixin configs via [[mixins]] entries here.
+# (See TECHNICAL.md §3.1 — the ForgeGradle/MixinGradle approach is fully obsolete on NeoForge.)
+[[mixins]]
+config="${mod_id}.mixins.json"
 
 [[mods]]
 modId="${mod_id}"
@@ -20,15 +26,15 @@ ${mod_description}
     side="BOTH"
 
 [[dependencies.${mod_id}]]
-    modId="forge"
+    modId="neoforge"
     mandatory=true
-    versionRange="${forge_version_range}"
+    versionRange="${neo_version_range}"
     ordering="NONE"
     side="BOTH"
 
 [[dependencies.${mod_id}]]
     modId="minecraft"
     mandatory=true
-    versionRange="${minecraft_version_range}"
+    versionRange="[1.21.1,1.22)"
     ordering="NONE"
     side="BOTH"

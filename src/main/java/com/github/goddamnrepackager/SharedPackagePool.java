@@ -1,9 +1,12 @@
 package com.github.goddamnrepackager;
 
+import com.mojang.serialization.DataResult;
 import com.simibubi.create.content.logistics.BigItemStack;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -34,6 +37,13 @@ import java.util.Map;
  * count semantics (TECHNICAL.md §3.5): a BigItemStack's count is how many times
  * that package ships, not how many entries. poll() pops one shipment unit at a
  * time (splitting the head entry when count>1); deposit() appends whole entries.
+ *
+ * --- 1.21.1 / NeoForge migration notes ---
+ * SavedData API changed: computeIfAbsent now takes a SavedData.Factory<T> + name,
+ * and save/load carry a HolderLookup.Provider (needed because ItemStack is
+ * data-component based since 1.20.5 and its codec requires registry access).
+ * BigItemStack no longer has read(CompoundTag)/write() — we use its Codec
+ * directly with NbtOps + the registries-backed serialization context.
  */
 public class SharedPackagePool extends SavedData {
 
@@ -43,8 +53,12 @@ public class SharedPackagePool extends SavedData {
 
     public SharedPackagePool() {}
 
-    /** Load from NBT. */
-    public static SharedPackagePool load(CompoundTag root) {
+    /**
+     * Load from NBT.
+     *
+     * @param registries needed to decode ItemStack components inside each BigItemStack
+     */
+    public static SharedPackagePool load(CompoundTag root, HolderLookup.Provider registries) {
         SharedPackagePool pool = new SharedPackagePool();
         ListTag vaultList = root.getList("Vaults", Tag.TAG_COMPOUND);
         for (int i = 0; i < vaultList.size(); i++) {
@@ -55,7 +69,8 @@ public class SharedPackagePool extends SavedData {
             ListTag items = vaultEntry.getList("Packages", Tag.TAG_COMPOUND);
             Deque<BigItemStack> deque = new ArrayDeque<>();
             for (int j = 0; j < items.size(); j++) {
-                deque.add(BigItemStack.read(items.getCompound(j)));
+                BigItemStack bis = decodeBigItemStack(items.getCompound(j), registries);
+                if (bis != null) deque.add(bis);
             }
             if (!deque.isEmpty()) pool.pools.put(box, deque);
         }
@@ -63,7 +78,7 @@ public class SharedPackagePool extends SavedData {
     }
 
     @Override
-    public CompoundTag save(CompoundTag root) {
+    public CompoundTag save(CompoundTag root, HolderLookup.Provider registries) {
         ListTag vaultList = new ListTag();
         for (Map.Entry<BoundingBox, Deque<BigItemStack>> e : pools.entrySet()) {
             if (e.getValue().isEmpty()) continue;
@@ -76,7 +91,10 @@ public class SharedPackagePool extends SavedData {
             vaultEntry.putInt("MaxY", b.maxY());
             vaultEntry.putInt("MaxZ", b.maxZ());
             ListTag items = new ListTag();
-            for (BigItemStack bis : e.getValue()) items.add(bis.write());
+            for (BigItemStack bis : e.getValue()) {
+                CompoundTag encoded = encodeBigItemStack(bis, registries);
+                if (encoded != null) items.add(encoded);
+            }
             vaultEntry.put("Packages", items);
             vaultList.add(vaultEntry);
         }
@@ -84,9 +102,34 @@ public class SharedPackagePool extends SavedData {
         return root;
     }
 
+    /**
+     * Get or create the world-level pool. On 1.21.1, {@link SavedData.Factory} bundles
+     * the new-instance supplier and the (Tag, HolderLookup.Provider) deserializer.
+     */
     public static SharedPackagePool get(MinecraftServer server) {
         return server.overworld().getDataStorage().computeIfAbsent(
-                SharedPackagePool::load, SharedPackagePool::new, DATA_ID);
+                new SavedData.Factory<>(
+                        SharedPackagePool::new,
+                        (tag, registries) -> load(tag, registries),
+                        null /* DataFixType — none, we handle versioning ourselves */),
+                DATA_ID);
+    }
+
+    // --- BigItemStack codec helpers ---
+    // BigItemStack.CODEC is Codec<BigItemStack>; it composes ItemStack.OPTIONAL_CODEC (which needs
+    // registry access for components) so we must run it through a registries-aware serialization context.
+
+    private static BigItemStack decodeBigItemStack(CompoundTag tag, HolderLookup.Provider registries) {
+        var ops = registries.createSerializationContext(NbtOps.INSTANCE);
+        DataResult<BigItemStack> result = BigItemStack.CODEC.parse(ops, tag);
+        return result.result().orElse(null);
+    }
+
+    private static CompoundTag encodeBigItemStack(BigItemStack bis, HolderLookup.Provider registries) {
+        var ops = registries.createSerializationContext(NbtOps.INSTANCE);
+        DataResult<Tag> result = BigItemStack.CODEC.encodeStart(ops, bis);
+        Tag tag = result.result().orElse(null);
+        return tag instanceof CompoundTag ct ? ct : null;
     }
 
     /** Winner deposits a whole repackaged batch (to tail, FIFO preserved). */

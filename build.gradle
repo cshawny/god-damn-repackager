@@ -2,13 +2,7 @@ plugins {
     id 'eclipse'
     id 'idea'
     id 'maven-publish'
-    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
-    // MixinGradle: SpongePowered's official Gradle plugin. ForgeGradle 6's UserDevExtension
-    // removed the old `mixin {}` block, so without this plugin our mixin config is never
-    // registered in the dev environment (the "probe compiles but never fires" symptom).
-    // MixinGradle re-introduces the `mixin {}` extension at the PROJECT level and handles
-    // refmap generation + dev-env mixin config wiring.
-    id 'org.spongepowered.mixin' version '0.7-SNAPSHOT'
+    id 'net.neoforged.moddev' version '2.0.141'
 }
 
 version = mod_version
@@ -18,108 +12,57 @@ base {
     archivesName = mod_id
 }
 
-// === Mixin configuration (provided by the org.spongepowered.mixin plugin above) ===
-mixin {
-    add sourceSets.main, "${mod_id}.refmap.json"
-    config "${mod_id}.mixins.json"
-}
-
-// Mojang ships Java 17 to end users in 1.18+, so your mod should target Java 17.
-java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+// Mojang ships Java 21 to end users in 1.21+, so target Java 21.
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
 println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
-minecraft {
-    // The mappings can be changed at any time and must be in the following format.
-    // Channel:   Version:
-    // official   MCVersion             Official field/method names from Mojang mapping files
-    // parchment  YYYY.MM.DD-MCVersion  Open community-sourced parameter names and javadocs layered on top of official
-    //
-    // You must be aware of the Mojang license when using the 'official' or 'parchment' mappings.
-    // See more information here: https://github.com/MinecraftForge/MCPConfig/blob/master/Mojang.md
-    //
-    // Parchment is an unofficial project maintained by ParchmentMC, separate from MinecraftForge
-    // Additional setup is needed to use their mappings: https://parchmentmc.org/docs/getting-started
-    //
-    // Use non-default mappings at your own risk. They may not always work.
-    // Simply re-run your setup task after changing the mappings to update your workspace.
-    mappings channel: mapping_channel, version: mapping_version
 
-    // When true, this property will have all Eclipse/IntelliJ IDEA run configurations run the "prepareX" task for the given run configuration before launching the game.
-    // In most cases, it is not necessary to enable.
-    // enableEclipsePrepareRuns = true
-    // enableIdeaPrepareRuns = true
+neoForge {
+    version = neo_version
 
-    // This property allows configuring Gradle's ProcessResources task(s) to run on IDE output locations before launching the game.
-    // It is REQUIRED to be set to true for this template to function.
-    // See https://docs.gradle.org/current/dsl/org.gradle.language.jvm.tasks.ProcessResources.html
-    copyIdeResources = true
+    // Generate neoforge.mods.toml from the template in src/main/templates/ (handles ${...} substitution).
+    // NeoForge discovers mixin configs via [[mixins]] entries in neoforge.mods.toml — the old ForgeGradle
+    // `mixin {}` block + MixinGradle plugin + `MixinConfigs` jar manifest attribute are ALL obsolete on
+    // NeoForge (see TECHNICAL.md §3.1). Mixin is bundled into NeoForge itself; no extra Gradle plugin needed.
 
-    // When true, this property will add the folder name of all declared run configurations to generated IDE run configurations.
-    // The folder name can be set on a run configuration using the "folderName" property.
-    // By default, the folder name of a run configuration is the name of the Gradle project containing it.
-    // generateRunFolders = true
+    parchment {
+        // Parchment adds parameter names on top of the official mappings.
+        minecraftVersion = minecraft_version
+        mappingsVersion = "2024.11.17"
+    }
 
-    // This property enables access transformers for use in development.
-    // They will be applied to the Minecraft artifact.
-    // The access transformer file can be anywhere in the project.
-    // However, it must be at "META-INF/accesstransformer.cfg" in the final mod jar to be loaded by Forge.
-    // This default location is a best practice to automatically put the file in the right place in the final jar.
-    // See https://docs.minecraftforge.net/en/latest/advanced/accesstransformers/ for more information.
-    // accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
-
-    // Default run configurations.
-    // These can be tweaked, removed, or duplicated as needed.
     runs {
-        // applies to all the run configs below
         configureEach {
-            workingDirectory project.file('run')
-
-            // Recommended logging data for a userdev environment
-            property 'forge.logging.markers', ''
-
             // Recommended logging level for the console
-            property 'forge.logging.console.level', 'info'
-
-            // === Mixin refmap remapping (CRITICAL) ===
-            // Without these, Create/Ponder/Flywheel's bundled refmaps (which target SRG names
-            // like m_5741_) are NOT translated back to dev-environment names (like resizeDisplay),
-            // and every one of their mixins fails to apply with "could not find any targets".
-            // Our own goddamnrepacker.refmap.json is also remapped here (registered via the
-            // `mixin {}` block at the top of this file).
-            property 'mixin.env.remapRefMap', 'true'
-            property 'mixin.env.refMapRemappingFile', "${project.projectDir}/build/createSrgToMcp/output.srg"
+            systemProperty 'neoforge.logging.console.level', 'info'
+            systemProperty 'neoforge.logging.markers', ''
 
             // Make our own mod's sources available to the run
             mods {
                 "${mod_id}" {
-                    source sourceSets.main
+                    sourceSet sourceSets.main
                 }
             }
         }
 
         client {
-            // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
-            property 'forge.enabledGameTestNamespaces', mod_id
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', mod_id
         }
 
         server {
-            property 'forge.enabledGameTestNamespaces', mod_id
-            args '--nogui'
-        }
-
-        // This run config launches GameTestServer and runs all registered gametests, then exits.
-        // By default, the server will crash when no gametests are provided.
-        // The gametest system is also enabled by default for other run configs under the /test command.
-        gameTestServer {
-            property 'forge.enabledGameTestNamespaces', mod_id
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', mod_id
         }
 
         data {
-            // example of overriding the workingDirectory set in configureEach above
-            workingDirectory project.file('run-data')
-
-            // Specify the modid for data generation, where to output the resulting resource, and where to look for existing resources.
-            args '--mod', mod_id, '--all', '--output', file('src/generated/resources/'), '--existing', file('src/main/resources/')
+            data()
+            programArguments.addAll(
+                    '--mod', mod_id, '--all',
+                    '--output', file('src/generated/resources/').getAbsolutePath(),
+                    '--existing', file('src/main/resources/').getAbsolutePath()
+            )
         }
     }
 }
@@ -128,15 +71,15 @@ minecraft {
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 repositories {
-    // Create, Ponder, Flywheel (Create's maven, formerly maven.simibubi.com)
+    // Create, Ponder, Flywheel (Create's maven; Create publishes non-release builds with build numbers here)
     maven {
         name = "Create Maven"
-        url = "https://maven.createmod.net/"
+        url = "https://maven.createmod.net"
     }
-    // Registrate mirror
+    // Registrate mirror (1.21 line)
     maven {
         name = "Registrate Mirror"
-        url = "https://maven.ithundxr.dev/mirror"
+        url = "https://maven.ithundxr.dev/snapshots"
     }
     // ForgeConfigAPIPort (transitive dep of some Create deps)
     maven {
@@ -148,78 +91,63 @@ repositories {
         name = "BlameJared"
         url = "https://maven.blamejared.com/"
     }
-    // Mixin annotation processor sources
-    maven {
-        name = "SpongePowered"
-        url = "https://repo.spongepowered.org/repository/maven-public/"
-    }
 }
 
 dependencies {
-    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-
-    // Create 6.0.8 dev-environment dependency.
-    // Per official Create wiki ("Depend on Create", Forge 1.20.1).
-    // :slim + explicit Ponder/Flywheel/Registrate makes the Mixin refmaps remap correctly
-    // in the dev environment. The :all fat jar does NOT remap and crashes with catnip/ponder mixin errors.
-    implementation(fg.deobf("com.simibubi.create:create-${minecraft_version}:${create_version}:slim") { transitive = false })
-    implementation(fg.deobf("net.createmod.ponder:Ponder-Forge-${minecraft_version}:${ponder_version}"))
-    compileOnly(fg.deobf("dev.engine-room.flywheel:flywheel-forge-api-${minecraft_version}:${flywheel_version}"))
-    runtimeOnly(fg.deobf("dev.engine-room.flywheel:flywheel-forge-${minecraft_version}:${flywheel_version}"))
-    implementation(fg.deobf("com.tterrag.registrate:Registrate:${registrate_version}"))
-
-    // MixinExtras (Create and its deps use it)
-    compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:0.4.1"))
-    implementation("io.github.llamalad7:mixinextras-forge:0.4.1")
+    // Create 6.0.10 (build 289) dev-environment dependency.
+    // Per official Create wiki ("Depend on Create", NeoForge 1.21.1).
+    // :slim + explicit Ponder/Flywheel/Vanillin makes the Mixin refmaps remap correctly
+    // in the dev environment (mirrors how Create itself pulls its own deps).
+    implementation("com.simibubi.create:create-${minecraft_version}:${create_version}:slim") { transitive = false }
+    implementation("net.createmod.ponder:ponder-neoforge:${ponder_version}+mc${minecraft_version}")
+    compileOnly("dev.engine-room.flywheel:flywheel-neoforge-api-${minecraft_version}:${flywheel_version}")
+    runtimeOnly("dev.engine-room.flywheel:flywheel-neoforge-${minecraft_version}:${flywheel_version}")
+    // Vanillin: Flywheel's UI layer, split out as a separate dep on 1.21.1. Required at runtime by Create.
+    runtimeOnly("dev.engine-room.vanillin:vanillin-neoforge-${minecraft_version}:${vanillin_version}")
+    implementation("com.tterrag.registrate:Registrate:${registrate_version}")
 
     // JEI — needed to issue crafting orders in-game (the only way to send a bulk crafting request).
-    // runtimeOnly only: we don't compile against JEI, we just need it present to place crafting orders.
-    runtimeOnly(fg.deobf("mezz.jei:jei-${minecraft_version}-forge:${jei_version}"))
-
-    // Mixin annotation processor (catches our own injection errors at compile time)
-    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+    runtimeOnly("mezz.jei:jei-${minecraft_version}-neoforge:${jei_version}")
 }
 
-// NOTE: MixinGradle's built-in `addMixinsToJar` task already injects the generated refmap into
-// the jar AND wires it into the dev classpath. We previously added a manual `copyRefmap` task,
-// but that caused a "duplicate refmap" error at jar time — so it's been removed. MixinGradle
-// handles refmap placement on its own.
-
-// This block of code expands all declared replace properties in the specified resource targets.
-// A missing property will result in an error. Properties are expanded using ${} Groovy notation.
-// When "copyIdeResources" is enabled, this will also run before the game launches in IDE environments.
-// See https://docs.gradle.org/current/dsl/org.gradle.language.jvm.tasks.ProcessResources.html
-tasks.named('processResources', ProcessResources).configure {
+// === neoforge.mods.toml template expansion ===
+// ModDevGradle doesn't auto-process src/main/templates/ unless we wire it up (Create uses a custom
+// generateModMetadata task). We replicate that here: substitute ${...} from gradle.properties and
+// emit the file into build/generated/sources/modMetadata/, then add it to resources.
+def generateModMetadata = tasks.register('generateModMetadata', ProcessResources) {
     var replaceProperties = [
-            minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
-            forge_version: forge_version, forge_version_range: forge_version_range,
-            loader_version_range: loader_version_range,
-            mod_id: mod_id, mod_name: mod_name, mod_license: mod_license, mod_version: mod_version,
-            mod_authors: mod_authors, mod_description: mod_description,
+            mod_id          : mod_id,
+            mod_name        : mod_name,
+            mod_version     : mod_version,
+            mod_authors     : mod_authors,
+            mod_description : mod_description,
+            mod_license     : mod_license,
+            neo_version_range: neo_version_range,
     ]
     inputs.properties replaceProperties
+    expand replaceProperties
+    from 'src/main/templates'
+    into 'build/generated/sources/modMetadata'
+}
 
-    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
-        expand replaceProperties + [project: project]
+sourceSets.main.resources.srcDir(generateModMetadata)
+neoForge.ideSyncTask(generateModMetadata)
+
+// Also expand pack.mcmeta's ${mod_id} reference.
+tasks.named('processResources', ProcessResources).configure {
+    var replaceProperties = [
+            mod_id: mod_id,
+    ]
+    inputs.properties replaceProperties
+    filesMatching('pack.mcmeta') {
+        expand replaceProperties
     }
 }
 
-// Configure the Mixin annotation processor to generate a refmap.
-// The refmap filename is taken from the "refmap" key in the mixins.json automatically.
-configurations {
-    annotationProcessor
-}
-afterEvaluate {
-    tasks.withType(JavaCompile).configureEach {
-        options.annotationProcessorPath = configurations.annotationProcessor
-    }
-}
-
-// Example for how to get properties into the manifest for reading at runtime.
 tasks.named('jar', Jar).configure {
     // Alpha-stage marker: append "-alpha" to the artifact name so the pre-release status is
-    // visible in the filename (e.g. goddamnrepackager-0.3.0-alpha.jar). Controlled by the
-    // mod_is_alpha flag in gradle.properties. See TECHNICAL.md §5.
+    // visible in the filename (e.g. goddamnrepackager-0.4.0-neoforge-alpha.jar). Controlled by
+    // the mod_is_alpha flag in gradle.properties. See TECHNICAL.md §5.
     if (project.hasProperty('mod_is_alpha') && project.property('mod_is_alpha').toBoolean()) {
         archiveClassifier = 'alpha'
     }
@@ -228,24 +156,14 @@ tasks.named('jar', Jar).configure {
         attributes([
                 'Specification-Title'     : mod_id,
                 'Specification-Vendor'    : mod_authors,
-                'Specification-Version'   : '1', // We are version 1 of ourselves
+                'Specification-Version'   : '1',
                 'Implementation-Title'    : project.name,
                 'Implementation-Version'  : project.jar.archiveVersion,
                 'Implementation-Vendor'   : mod_authors,
                 'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
-                // Tell Forge which mixin config to load
-                'MixinConfigs'            : "${mod_id}.mixins.json"
         ])
     }
-
-    // This is the preferred method to reobfuscate your jar file
-    finalizedBy 'reobfJar'
 }
-
-// However if you are in a multi-project build, dev time needs unobfed jar files, so you can delay the obfuscation until publishing by doing:
-// tasks.named('publish').configure {
-//     dependsOn 'reobfJar'
-// }
 
 // Example configuration to allow publishing using the maven-publish plugin
 publishing {
