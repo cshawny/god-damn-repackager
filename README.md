@@ -1,6 +1,20 @@
+<!--
+  ════════════════════════════════════════════════════════════════════════
+  项目级文档(跨分支共享)
+  ─────────────────────────
+  本文件同时描述 Forge 1.20.1 和 NeoForge 1.21.1 两个版本,在 master(forge)
+  和 neoforge-1.21.1 两个分支里必须**完全一致**。
+
+  改动一边后,必须 cherry-pick / 手动同步到另一边。两个版本的信息都要同时
+  包含(差异用表格列,见下方"支持的平台与版本"和"安装"章节)。
+
+  分支特定的开发文档是 AGENTS.md 和 TECHNICAL.md(各自独立,不跨分支同步)。
+  ════════════════════════════════════════════════════════════════════════
+-->
+
 # God Damn Repackager
 
-> **⚠️ ALPHA 版本（0.4.0）**
+> **⚠️ ALPHA 版本**
 > 本模组目前处于早期测试阶段。它通过 Mixin 修改机械动力（Create）的理包机核心逻辑，
 > **尚未经过大规模、长时间的稳定性测试**。已知风险包括（但不限于）：
 > - 在未预见的边界场景下可能导致**物品丢失或异常**
@@ -14,8 +28,27 @@
 > 理包机工作"的问题，当时需要手动重新放置理包机。**0.2.1 已修复此问题**，升级后无需任何操作。
 > 详见下方[已知限制](#已知限制)。
 
-A Forge mod for Minecraft 1.20.1 that makes Create 6.0+'s Repackagers parallelize a single large
-crafting order across all repackagers sharing the same input vault.
+一个让 Create 6.0+ 的理包机（Repackager）并行处理同一保险库（Vault）大批量合成订单的模组。
+N 个理包机 ≈ N 倍合成速度。**同时提供 Forge 1.20.1 和 NeoForge 1.21.1 两个版本。**
+
+---
+
+## 支持的平台与版本
+
+本模组为两个 MC / 加载器组合各维护一个版本，功能完全一致。请根据你的游戏环境选择对应的 jar。
+
+| | Forge 版本 | NeoForge 版本 |
+|---|---|---|
+| **Minecraft** | 1.20.1 | 1.21.1 |
+| **加载器** | Forge 47.x | NeoForge 21.1.x |
+| **Create（必需依赖）** | 6.0.x（已测试 6.0.8） | 6.0.x（已测试 6.0.10） |
+| **模组版本号** | `0.4.0-forge` | `0.4.0-neoforge` |
+| **jar 文件名** | `goddamnrepackager-0.4.0-forge-alpha.jar` | `goddamnrepackager-0.4.0-neoforge-alpha.jar` |
+| **维护分支** | `master` | `neoforge-1.21.1` |
+
+> 两个版本功能相同，选哪个取决于你玩的整合包用 Forge 还是 NeoForge。
+> 如果你不知道选哪个：单人/新整合包推荐 NeoForge 1.21.1（更新、更现代）；
+> 老存档或已有 Forge 整合包继续用 Forge 1.20.1。
 
 ---
 
@@ -58,9 +91,11 @@ crafting order across all repackagers sharing the same input vault.
 
 ## 安装
 
-1. 安装 **Minecraft 1.20.1 + Forge 47.x**
-2. 安装 **Create 6.0.x**（已测试 6.0.8）
-3. 把 `goddamnrepackager-0.4.0-alpha.jar` 放进 `.minecraft/mods/` 文件夹
+两个版本的安装步骤相同，只是 jar 和依赖版本不同：
+
+1. 安装对应版本的 **Minecraft + 加载器**（见上方[支持的平台与版本](#支持的平台与版本)表）
+2. 安装 **Create 6.0.x**（必需依赖，版本见上表）
+3. 把对应版本的 `goddamnrepackager-*.jar` 放进 `.minecraft/mods/` 文件夹
 4. 启动游戏
 
 > **从 0.2.0 升级？** 直接替换 jar 即可。0.2.0 曾要求在老存档里重新放置理包机，
@@ -84,10 +119,13 @@ crafting order across all repackagers sharing the same input vault.
 
 ## 兼容性
 
-- ✅ 已测试：Minecraft 1.20.1 + Forge 47.2.0 + Create 6.0.8
+- ✅ 已测试：
+  - Minecraft 1.20.1 + Forge 47.2.0 + Create 6.0.8
+  - Minecraft 1.21.1 + NeoForge 21.1.x + Create 6.0.10
 - ✅ 已在含其它模组的环境和多人服务器中测试，无冲突
 - ⚠️ 仅针对 Create 6.0.x 的物流系统设计；不兼容 Create 0.5.1 及更早版本
-- ⚠️ 仅 Forge 版本（Fabric 移植见 [TECHNICAL.md](TECHNICAL.md) 的后续方向）
+- ⚠️ Forge 1.20.1 和 NeoForge 1.21.1 各自独立维护，功能一致；Fabric 移植见
+  [TECHNICAL.md](TECHNICAL.md) 的后续方向
 
 ## 已知限制
 
