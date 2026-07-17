@@ -1,5 +1,8 @@
 modLoader="javafml"
-loaderVersion="${neo_version_range}"
+# loaderVersion is the FML *language loader* version range (NOT the NeoForge version).
+# NeoForge's javafml loader reports version 4.x at runtime, so a loose lower bound matches.
+# (Using the NeoForge version here caused "Missing language javafml version [21.1.219,)" errors.)
+loaderVersion="${loader_version_range}"
 license="${mod_license}"
 
 # NeoForge mixin registration. NeoForge no longer reads the old `MixinConfigs` jar
@@ -20,21 +23,21 @@ ${mod_description}
 # We depend on Create (the mod we are patching)
 [[dependencies.${mod_id}]]
     modId="create"
-    mandatory=true
+    type="required"
     versionRange="[6.0.0,)"
     ordering="AFTER"
     side="BOTH"
 
 [[dependencies.${mod_id}]]
     modId="neoforge"
-    mandatory=true
-    versionRange="${neo_version_range}"
+    type="required"
+    versionRange="[${neo_version},)"
     ordering="NONE"
     side="BOTH"
 
 [[dependencies.${mod_id}]]
     modId="minecraft"
-    mandatory=true
-    versionRange="[1.21.1,1.22)"
+    type="required"
+    versionRange="${minecraft_version_range}"
     ordering="NONE"
     side="BOTH"

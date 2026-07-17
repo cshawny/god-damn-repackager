@@ -118,13 +118,15 @@ dependencies {
 // emit the file into build/generated/sources/modMetadata/, then add it to resources.
 def generateModMetadata = tasks.register('generateModMetadata', ProcessResources) {
     var replaceProperties = [
-            mod_id          : mod_id,
-            mod_name        : mod_name,
-            mod_version     : mod_version,
-            mod_authors     : mod_authors,
-            mod_description : mod_description,
-            mod_license     : mod_license,
-            neo_version_range: neo_version_range,
+            mod_id              : mod_id,
+            mod_name            : mod_name,
+            mod_version         : mod_version,
+            mod_authors         : mod_authors,
+            mod_description     : mod_description,
+            mod_license         : mod_license,
+            loader_version_range: loader_version_range,
+            neo_version         : neo_version,
+            minecraft_version_range: minecraft_version_range,
     ]
     inputs.properties replaceProperties
     expand replaceProperties
