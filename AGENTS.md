@@ -25,7 +25,7 @@
 
 ### 产出的 jar
 
-- `build/libs/goddamnrepackager-0.4.0-alpha.jar`。
+- `build/libs/goddamnrepackager-0.4.0-forge-alpha.jar`。
 - alpha 后缀由 `gradle.properties` 的 `mod_is_alpha=true` 控制(给 `jar` 任务设 `archiveClassifier = 'alpha'`)。脱离 alpha 后改 `false` 即可去掉后缀。
 
 ### 验证方式
@@ -135,7 +135,7 @@ src/main/java/com/github/goddamnrepackager/
 
 ### alpha jar 后缀规则
 
-- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.4.0-alpha.jar`。
+- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.4.0-forge-alpha.jar`(`-forge` 后缀区分 neoforge-1.21.1 分支的 `0.4.0-neoforge` 版本)。
 - 文档里 jar 文件名示例要匹配(README 的安装步骤)。
 - TECHNICAL.md §5 记录了此约定。
 - 脱离 alpha 时:改 `gradle.properties` 的 `mod_is_alpha=false` + 去掉文档里 `-alpha` 后缀。

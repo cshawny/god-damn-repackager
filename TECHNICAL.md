@@ -562,8 +562,8 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
    **结束后**（completedOrderId 仍 -1 时）主动塞料 + 触发，而非在 `addPackageFragment` 单次调用触发。
 3. **多机并发是独立难题**：需要 per-tick 去重，避免多机重复处理同一订单。
 
-**当前状态**：模组停留在 0.4.0（共享池），部分重组未实现。jar 名仍为
-`goddamnrepackager-0.4.0-alpha.jar`。
+**当前状态**：模组停留在 0.4.0（共享池），部分重组未实现。jar 名(forge 分支)为
+`goddamnrepackager-0.4.0-forge-alpha.jar`。
 
 ---
 
@@ -579,9 +579,10 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
    ./g.sh runClient        # 启动开发环境游戏（含 Create + JEI）
    ```
 4. 发布 jar 在 `build/libs/` 下。**alpha 阶段的 jar 带有 `-alpha` 后缀**，例如
-   `goddamnrepackager-0.4.0-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
+   `goddamnrepackager-0.4.0-forge-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
    通过给 `jar` 任务设 `archiveClassifier = 'alpha'` 实现）。脱离 alpha 后把 `mod_is_alpha` 改为
-   `false`，jar 名即变为 `goddamnrepackager-<version>.jar`。
+   `false`，jar 名即变为 `goddamnrepackager-<version>.jar`。`-forge` 后缀用于和 neoforge-1.21.1
+   分支的 `0.4.0-neoforge` 版本区分。
 
 > `g.sh` 是必须的——直接 `./gradlew` 会用系统默认 Java（可能是 22），导致
 > `Unsupported class file major version 66` 错误。
