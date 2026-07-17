@@ -3,7 +3,6 @@ package com.github.goddamnrepackager;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
-import net.neoforged.neoforge.common.NeoForge;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -30,11 +29,15 @@ public class GodDamnRepackager {
     /**
      * NeoForge passes the mod event bus and mod container as constructor parameters
      * (the Forge-era {@code FMLJavaModLoadingContext.get().getModEventBus()} escape hatch is
-     * discouraged). We don't currently subscribe to any mod-bus events, but we keep the
-     * params so future hooks (data-gen, registry) are easy to add.
+     * discouraged). We keep the params so future hooks (data-gen, registry) are easy to add.
+     *
+     * NOTE: do NOT call {@code NeoForge.EVENT_BUS.register(this)} unless this class actually
+     * declares a {@code @SubscribeEvent} method — NeoForge's event bus throws
+     * IllegalArgumentException if register() is called on an object with no listeners
+     * (unlike Forge, which only warned). This mod's logic lives entirely in mixins, so there
+     * is nothing to subscribe to.
      */
     public GodDamnRepackager(IEventBus modBus, ModContainer modContainer) {
-        NeoForge.EVENT_BUS.register(this);
         LOGGER.info("God Damn Repackager loaded (NeoForge). Multiple repackagers, one order — finally.");
     }
 }
