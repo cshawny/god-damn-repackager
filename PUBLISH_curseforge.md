@@ -51,16 +51,15 @@ jar that matches your setup.
 | **Minecraft** | 1.20.1 | 1.21.1 |
 | **Loader** | Forge 47.x | NeoForge 21.1.x |
 | **Create (required dep)** | 6.0.x (tested 6.0.8) | 6.0.x (tested 6.0.10) |
-| **Mod version** | `0.5.0-forge` | `0.4.0-neoforge` |
-| **Jar filename** | `goddamnrepackager-0.5.0-forge-alpha.jar` | `goddamnrepackager-0.4.0-neoforge-alpha.jar` |
+| **Mod version** | `0.5.0-forge` | `0.5.0-neoforge` |
+| **Jar filename** | `goddamnrepackager-0.5.0-forge-alpha.jar` | `goddamnrepackager-0.5.0-neoforge-alpha.jar` |
 
 > Choose based on whether your pack runs Forge or NeoForge.
 > If you're unsure: NeoForge 1.21.1 is recommended for new/single-player packs (more modern);
 > stick with Forge 1.20.1 for existing saves or Forge-based packs.
 >
-> **Version note:** 0.5.0's new **partial repackaging** (start crafting as soon as any materials
-> arrive — see below) is currently available in the Forge build only; the NeoForge port follows.
-> The shared-pool parallelism is identical on both builds.
+> Both builds are feature-identical: shared-package-pool parallelism (0.4.0) + **partial repackaging**
+> (0.5.0 — start crafting as soon as any materials arrive, see below).
 
 ## The Problem
 
@@ -106,7 +105,7 @@ package pool** (stored in the world save):
   downstream clogged) simply stops polling and its work is naturally picked up by idle siblings. No
   separate rebalance layer is needed.
 
-**Partial repackaging (new in 0.5.0, Forge build for now):** vanilla repackagers wait until ALL of an
+**Partial repackaging (new in 0.5.0):** vanilla repackagers wait until ALL of an
 order's material fragments have arrived before doing anything (all-or-nothing). Fragments trickle in
 over the transport network, so large orders waste a long "waiting for the last piece" window. 0.5.0
 lets repackagers start as soon as the arrived fragments afford at least one craft: available materials
