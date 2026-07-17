@@ -1,3 +1,18 @@
+<!--
+  ════════════════════════════════════════════════════════════════════════
+  项目级文档(跨分支共享) — English publish copy for CurseForge/Modrinth
+  ─────────────────────────
+  This file describes BOTH the Forge 1.20.1 and NeoForge 1.21.1 builds and must
+  be IDENTICAL across the `master` (forge) and `neoforge-1.21.1` branches.
+
+  After editing one side, cherry-pick / manually sync to the other. Both builds'
+  info must be present (differences go in the "Supported platforms" / "Installation"
+  tables below).
+
+  Branch-specific dev docs are AGENTS.md and TECHNICAL.md (independent per branch).
+  ════════════════════════════════════════════════════════════════════════
+-->
+
 # CurseForge Mod Description (English — copy directly into the Description editor)
 
 > CurseForge's Description field supports Markdown. Paste the content below.
@@ -14,7 +29,7 @@
 
 # God Damn Repackager
 
-> **⚠️ ALPHA (0.4.0)**
+> **⚠️ ALPHA**
 > This mod is in early testing. It uses a Mixin to modify Create's repackager core logic and
 > has not yet undergone large-scale, long-term stability testing. **Back up your world before
 > using it.** Bug reports are welcome on the project page.
@@ -23,6 +38,26 @@
 > (e.g. 6 of 9) in an existing world, requiring you to re-place the repackagers. **Fixed in 0.2.1** —
 > just upgrade, no re-placement needed. See [Known Limitations](#known-limitations).
 
+**God Damn Repackager** makes all repackagers attached to the same input vault share the work.
+N repackagers ≈ N× throughput. **Available for both Forge 1.20.1 and NeoForge 1.21.1.**
+
+## Supported platforms & versions
+
+This mod is maintained for two MC / loader combinations with identical functionality. Pick the
+jar that matches your setup.
+
+| | Forge build | NeoForge build |
+|---|---|---|
+| **Minecraft** | 1.20.1 | 1.21.1 |
+| **Loader** | Forge 47.x | NeoForge 21.1.x |
+| **Create (required dep)** | 6.0.x (tested 6.0.8) | 6.0.x (tested 6.0.10) |
+| **Mod version** | `0.4.0-forge` | `0.4.0-neoforge` |
+| **Jar filename** | `goddamnrepackager-0.4.0-forge-alpha.jar` | `goddamnrepackager-0.4.0-neoforge-alpha.jar` |
+
+> Both builds are functionally identical — choose based on whether your pack runs Forge or NeoForge.
+> If you're unsure: NeoForge 1.21.1 is recommended for new/single-player packs (more modern);
+> stick with Forge 1.20.1 for existing saves or Forge-based packs.
+
 ## The Problem
 
 In vanilla Create 6.0+, when you place a large crafting order through the Stockkeeper for your
@@ -30,9 +65,6 @@ crafter array (e.g. "craft 1000 iron blocks"), **the entire order is processed b
 Repackager**. Even if your input vault is surrounded by repackagers, only one of them does any
 work — the rest sit idle. A repackager emits only one package per second (20-tick animation
 cycle), so large orders take a very long time.
-
-**God Damn Repackager** makes all repackagers attached to the same input vault share the work.
-N repackagers ≈ N× throughput.
 
 ## Speed Comparison
 
@@ -80,9 +112,12 @@ package pool** (stored in the world save):
 
 ## Installation
 
-1. Minecraft 1.20.1 + Forge 47.x
-2. Install **Create 6.0.x** (required dependency; tested with 6.0.8)
-3. Drop the jar into `.minecraft/mods/`
+Installation is identical for both builds — only the jar and Create version differ:
+
+1. Install the matching **Minecraft + loader** combo (see [Supported platforms](#supported-platforms--versions) above)
+2. Install **Create 6.0.x** (required dependency; version per the table above)
+3. Drop the matching `goddamnrepackager-*.jar` into `.minecraft/mods/`
+4. Launch the game
 
 > **Upgrading from 0.2.0?** Just replace the jar. 0.2.0 used to require re-placing repackagers in an
 > existing world; **0.2.1 fixed this** — no re-placement needed after upgrade. See
@@ -94,10 +129,13 @@ package pool** (stored in the world save):
 
 ## Compatibility
 
-- ✅ Tested: MC 1.20.1 + Forge 47.2.0 + Create 6.0.8
+- ✅ Tested:
+  - MC 1.20.1 + Forge 47.2.0 + Create 6.0.8
+  - MC 1.21.1 + NeoForge 21.1.x + Create 6.0.10
 - ✅ Tested in modpack environments and on multiplayer servers alongside other mods — no conflicts
 - ⚠️ Targets the Create 6.0.x logistics system only; not compatible with Create 0.5.1 and earlier
-- ⚠️ Forge only (a Fabric port may come later)
+- ⚠️ Forge 1.20.1 and NeoForge 1.21.1 are maintained independently with identical features; a Fabric
+  port may come later
 
 ## Known Limitations
 
