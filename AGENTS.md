@@ -7,7 +7,7 @@
 
 ## 1. 项目一句话
 
-一个 Forge 1.20.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度。当前处于 **alpha (0.4.0)**(共享包裹池架构)。
+一个 Forge 1.20.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度。当前处于 **alpha (0.5.0)**(共享包裹池 + 部分重组：材料到一部分就提前开工)。
 
 ---
 
@@ -25,7 +25,7 @@
 
 ### 产出的 jar
 
-- `build/libs/goddamnrepackager-0.4.0-forge-alpha.jar`。
+- `build/libs/goddamnrepackager-0.5.0-forge-alpha.jar`。
 - alpha 后缀由 `gradle.properties` 的 `mod_is_alpha=true` 控制(给 `jar` 任务设 `archiveClassifier = 'alpha'`)。脱离 alpha 后改 `false` 即可去掉后缀。
 
 ### 验证方式
@@ -36,6 +36,9 @@
   - `[GDR-POOL] deposited`:理包机整理后整批入共享池
   - `[GDR-POOL] fed`:空闲理包机从池里取 1 个包
   - `[GDR-POOL] drained & dropped`:vault 销毁/扩建时池爆出实体
+  - `[GDR-PARTIAL] crafted`(0.5.0):部分趟渐进合成了一批
+  - `[GDR-PARTIAL] final pass`(0.5.0):被接管订单末班收尾完成
+  - `[GDR-PARTIAL] drained / migrated`(0.5.0):vault 销毁爆余料 / reshape 迁移订单状态
 
 ---
 
@@ -47,25 +50,30 @@
 src/main/java/com/github/goddamnrepackager/
 ├── GodDamnRepackager.java          # @Mod 主类，只有日志+DEBUG_LOGGING 开关
 ├── SharedPackagePool.java          # ★ 世界级 SavedData：per-vault 共享包裹池(deposit/poll/migrateKey/drainAndDrop)
+├── PartialOrderTracker.java        # ★ 世界级 SavedData(0.5.0)：被接管订单的余料/消费进度/上下文
+├── PartialRepackager.java          # ★ 部分重组核心(0.5.0)：预扫描 + 部分趟 + 末班 vanilla 收尾
 ├── VaultIdentity.java              # 工具类：vaultBoundingBoxOf(r) 返回 vault 的 BoundingBox(两个 mixin 共用)
 ├── VaultBoxTracker.java            # 工具类：WeakHashMap 追踪 controller 的 last-known box(reshape 迁移用)
 └── mixin/
-    ├── RepackagerBlockEntityMixin.java   # @Redirect addAll → 入池
+    ├── RepackagerBlockEntityMixin.java   # @Inject HEAD(部分重组入口) + @Redirect addAll(入池)
     ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机从池 poll(注父类，instanceof 守卫，须 redstonePowered)
-    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 销毁(break/wrench)时 drop 池
-    └── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated(public) → vault reshape 时迁移池 key
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 销毁(break/wrench)时 drop 池+余料
+    ├── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated(public) → vault reshape 时迁移池 key+tracker key
+    └── PackageRepackageHelperInvoker.java # @Invoker 接口(0.5.0)：桥接 protected repackBasedOnRecipes
 ```
 
-> **注意**：mixin 类里**不能有 public/static 普通方法**——mixin 方法会被合并进目标类，非 private 的 static 方法会被 Mixin transformer 拒绝（`checkMethodVisibility` 报 `non-private static method`）。共享 helper 必须放独立工具类（如 `VaultIdentity`），不能放 mixin 类里。
+> **注意**：mixin 类里**不能有 public/static 普通方法**——mixin 方法会被合并进目标类，非 private 的 static 方法会被 Mixin transformer 拒绝（`checkMethodVisibility` 报 `non-private static method`）。共享 helper 必须放独立工具类（如 `VaultIdentity`），不能放 mixin 类里。@Invoker/@Accessor 接口 mixin 是标准例外（方法被转成调用桥，不合并）。
 
-### 当前注入点(mixin 里，三个)
+### 当前注入点(mixin 里，五个 + 一个 @Invoker)
 
 | 注入 | 方法 | 用途 |
 |---|---|---|
+| `@Inject(@At("HEAD"), cancellable)` | `RepackagerBlockEntity.attemptToRepackage` | **部分重组入口(0.5.0)**：零副作用预扫描；仅当部分/末班趟实际消费碎片并产出时才 cancel vanilla。完整订单/直通/无可合成一律放行 |
 | `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | **整批入池**:winner repack 后 deposit 进共享池(不入私有队列) |
 | `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`(注**父类**!) | **策略 A 灌队列**:空闲理包机每 tick 从池 poll 1 个包进私有队列。handler 内 `instanceof Repackager` 早退 |
-| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 销毁 drop 池**:drainAndDrop 该 vault 的池成实体 |
-| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`(public) | **vault reshape 迁移池 key**:旧 BoundingBox → 新 BoundingBox(包不爆不丢) |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 销毁 drop 池+余料**:drainAndDrop 该 vault 的池成实体 + 被接管订单的余料(0.5.0) |
+| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`(public) | **vault reshape 迁移 key**:池 key + tracker key 旧 BoundingBox → 新 BoundingBox(包不爆不丢) |
+| `@Invoker` | `PackageRepackageHelper.repackBasedOnRecipes`(protected) | **部分趟调 vanilla 部分合成(0.5.0)**：`repack()` 是 public 直接调（仅末班用） |
 
 ### 绝对不要碰的东西(除非你读透了对应小节)
 
@@ -77,11 +85,15 @@ src/main/java/com/github/goddamnrepackager/
 | Mixin 配置注册 | FG6 移除了 `mixin {}` 块，必须靠 MixinGradle 插件 + `mixin {}` 顶层块注册，否则 Mixin 编译进 jar 但运行时不触发 | TECHNICAL.md §3.1 |
 | `splitMulti` vs `splitMultiAndInvalidate` + `isController()` footgun | vault 销毁只能注 public `splitMulti`(break/wrench 覆盖)；reshape 另用 `notifyMultiUpdated` 迁移 key。private `splitMultiAndInvalidate` 因 SearchCache 是 package-private **无法注入**(Mixin 要求 handler 匹配完整参数列表)。teardown 后 `isController()` 谎报 true，必须用 `getControllerBE()` | TECHNICAL.md §3.9②③⑥ |
 | tick HEAD 灌队列必须守 `redstonePowered` | vanilla tick() 本身无红石检查(靠 lazyTick GATE 1)，我们的 tick 注入直接灌队列会绕过红石门。加 `if (!self.redstonePowered) return;`(见 §3.9⑦) | TECHNICAL.md §3.9⑦ |
+| 部分重组的五条不变量(0.5.0) | ① 绝不在 `addPackageFragment` 层面触发 repack(消耗≠删除=丢物品) ② 预扫描必须零副作用 ③ 部分趟只能调 `repackBasedOnRecipes`，末班才能调 `repack()` ④ count≤0 产物盒必须过滤(发出=凭空造物) ⑤ 余料只托管 SavedData，不可塞回保险库 | TECHNICAL.md §3.10 |
 
 ### 复用现有 helper(不要重新发明)
 
 - `SharedPackagePool.get(server)` — 取世界级池实例(SavedData)
 - `SharedPackagePool.deposit(vault, batch)` / `poll(vault)` / `pending(vault)` / `drainAndDrop(vault, level, pos)` — 池操作
+- `PartialOrderTracker.get(server)` — 取被接管订单的托管实例(SavedData，0.5.0)
+- `PartialOrderTracker.get(vault, orderId)` / `update(...)` / `forget(vault, orderId)` / `migrateKey(old, new)` / `drainAndDrop(vault, level, pos)` — 托管操作
+- `PartialRepackager.tryTakeover(repackager, inv)` — 部分重组入口(返回 true 则 cancel vanilla)
 - `VaultIdentity.vaultBoundingBoxOf(r)` — 返回理包机所连 vault 的 `BoundingBox`(从 `InventoryIdentifier.Bounds.bounds()` 取，**不要用 `IItemHandler ==`**，§3.7)。独立工具类(非 mixin)，两个 mixin 共用
 
 ### 访问 Create 字段的约定
@@ -135,7 +147,7 @@ src/main/java/com/github/goddamnrepackager/
 
 ### alpha jar 后缀规则
 
-- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.4.0-forge-alpha.jar`(`-forge` 后缀区分 neoforge-1.21.1 分支的 `0.4.0-neoforge` 版本)。
+- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.5.0-forge-alpha.jar`(`-forge` 后缀区分 neoforge-1.21.1 分支的 `0.4.0-neoforge` 版本)。
 - 文档里 jar 文件名示例要匹配(README 的安装步骤)。
 - TECHNICAL.md §5 记录了此约定。
 - 脱离 alpha 时:改 `gradle.properties` 的 `mod_is_alpha=false` + 去掉文档里 `-alpha` 后缀。
@@ -156,6 +168,8 @@ src/main/java/com/github/goddamnrepackager/
 - **§3.7**:能力实例代次不一致导致 `==` 失效(已修复,但理解原理能避开类似陷阱)
 - **§3.8**:heldBox 被动清空协议(动发送状态机前必读)
 - **§3.9**:0.4.0 共享池的七个核心陷阱(tick 注父类 / splitMulti 可见性 / reshape 用 notifyMultiUpdated 迁移 / isController footgun / vault-centric 归属 / mixin 类不能有 public static 方法 / tick HEAD 必须守 redstonePowered)
+- **§3.10**:0.5.0 部分重组的五条不变量(动 PartialRepackager/PartialOrderTracker 前必读——违反任何一条都会丢/复制物品)
 - **§4.1**:思路B 两条路径(路径①0.3.0 实现已废弃,路径②0.4.0 共享池已实现;策略 A vs B 取舍)
+- **§4.3**:部分重组三次失败尝试 + 0.5.0 成功路线(理解"为什么不能撬 isOrderComplete 闸门，而要接管订单生命周期")
 
 TECHNICAL.md 的 §6(常见问题排查表)和 §5(构建复现)也是日常会用到的。

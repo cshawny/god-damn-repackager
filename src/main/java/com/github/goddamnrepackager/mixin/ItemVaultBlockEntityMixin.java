@@ -54,6 +54,8 @@ public class ItemVaultBlockEntityMixin {
         if (oldBox != null && !oldBox.equals(newBox)) {
             // Reshape: migrate the pool key so packages follow the new geometry.
             SharedPackagePool.get(server).migrateKey(oldBox, newBox);
+            // Same for partially-repacked (taken-over) order tracking state.
+            com.github.goddamnrepackager.PartialOrderTracker.get(server).migrateKey(oldBox, newBox);
         }
         VaultBoxTracker.remember(self, newBox);
     }

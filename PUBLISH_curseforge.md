@@ -51,12 +51,16 @@ jar that matches your setup.
 | **Minecraft** | 1.20.1 | 1.21.1 |
 | **Loader** | Forge 47.x | NeoForge 21.1.x |
 | **Create (required dep)** | 6.0.x (tested 6.0.8) | 6.0.x (tested 6.0.10) |
-| **Mod version** | `0.4.0-forge` | `0.4.0-neoforge` |
-| **Jar filename** | `goddamnrepackager-0.4.0-forge-alpha.jar` | `goddamnrepackager-0.4.0-neoforge-alpha.jar` |
+| **Mod version** | `0.5.0-forge` | `0.4.0-neoforge` |
+| **Jar filename** | `goddamnrepackager-0.5.0-forge-alpha.jar` | `goddamnrepackager-0.4.0-neoforge-alpha.jar` |
 
-> Both builds are functionally identical — choose based on whether your pack runs Forge or NeoForge.
+> Choose based on whether your pack runs Forge or NeoForge.
 > If you're unsure: NeoForge 1.21.1 is recommended for new/single-player packs (more modern);
 > stick with Forge 1.20.1 for existing saves or Forge-based packs.
+>
+> **Version note:** 0.5.0's new **partial repackaging** (start crafting as soon as any materials
+> arrive — see below) is currently available in the Forge build only; the NeoForge port follows.
+> The shared-pool parallelism is identical on both builds.
 
 ## The Problem
 
@@ -102,6 +106,14 @@ package pool** (stored in the world save):
   downstream clogged) simply stops polling and its work is naturally picked up by idle siblings. No
   separate rebalance layer is needed.
 
+**Partial repackaging (new in 0.5.0, Forge build for now):** vanilla repackagers wait until ALL of an
+order's material fragments have arrived before doing anything (all-or-nothing). Fragments trickle in
+over the transport network, so large orders waste a long "waiting for the last piece" window. 0.5.0
+lets repackagers start as soon as the arrived fragments afford at least one craft: available materials
+are crafted and shipped immediately, and each newly arrived batch continues the order until it's done.
+Materials are conserved end-to-end — unused leftovers are held in the world save and drop in full if
+the vault is broken.
+
 > **Note on breaking blocks (0.4.0):** the shared pool is saved with the world, independent of any block.
 > Breaking a repackager does **not** drop the packages still in the pool — they're kept safely in the save,
 > and placing the repackager back resumes processing (nothing is lost). Only when the **vault itself is
@@ -123,9 +135,9 @@ Installation is identical for both builds — only the jar and Create version di
 > existing world; **0.2.1 fixed this** — no re-placement needed after upgrade. See
 > [Known Limitations](#known-limitations).
 >
-> **Upgrading from 0.3.x?** Just replace the jar. 0.4.0 replaces the internal balancing architecture
-> with a shared package pool — player-facing behavior is the same (N repackagers ≈ N× speed), just
-> more robust. No re-placement needed.
+> **Upgrading from 0.3.x / 0.4.x?** Just replace the jar — no re-placement needed, in-flight orders
+> are unaffected. 0.5.0 adds partial repackaging on top of the shared pool (start crafting as soon
+> as any materials arrive); you benefit automatically with zero setup.
 
 ## Compatibility
 
@@ -158,6 +170,12 @@ Installation is identical for both builds — only the jar and Create version di
   nothing is lost. Only destroying the vault itself (breaking a block or wrench-removing) drops that
   vault's pooled packages. Reshaping a vault (adding/removing blocks) does NOT drop — the pool migrates
   to the new shape and processing continues.
+- **An order being progressively crafted needs at least one powered repackager (0.5.0).** Once an
+  order is "taken over" (partial repackaging has begun), it needs at least one redstone-powered
+  repackager on the vault to keep progressing. Removing all repackagers or cutting their power
+  pauses the order — unused materials stay safely in the world save (and drop if the vault is
+  broken); place a repackager back and power it to resume. Orders without crafting recipes
+  (plain item orders) are never taken over and behave exactly like vanilla.
 - Repackagers must be attached to a Create Vault. Other containers (Crates, vanilla chests) are
   theoretically supported but not fully tested.
 

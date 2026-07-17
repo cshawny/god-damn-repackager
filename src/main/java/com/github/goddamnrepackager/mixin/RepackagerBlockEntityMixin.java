@@ -1,6 +1,7 @@
 package com.github.goddamnrepackager.mixin;
 
 import com.github.goddamnrepackager.GodDamnRepackager;
+import com.github.goddamnrepackager.PartialRepackager;
 import com.github.goddamnrepackager.SharedPackagePool;
 import com.github.goddamnrepackager.VaultIdentity;
 import com.simibubi.create.content.logistics.BigItemStack;
@@ -8,9 +9,12 @@ import com.simibubi.create.content.logistics.packager.repackager.RepackagerBlock
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraftforge.items.IItemHandler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -47,6 +51,19 @@ import java.util.List;
  */
 @Mixin(value = RepackagerBlockEntity.class, remap = false)
 public class RepackagerBlockEntityMixin {
+
+    /**
+     * Partial repackaging entry point. Runs a zero-side-effect pre-scan replica
+     * of vanilla's fragment scan; only cancels vanilla when a partial/final
+     * pass actually consumed fragments and produced packages. Complete orders,
+     * non-fragment passthrough, and nothing-craftable all defer to vanilla
+     * unchanged. See PartialRepackager for the full design.
+     */
+    @Inject(method = "attemptToRepackage", at = @At("HEAD"), cancellable = true)
+    private void goddamnrepackager$tryPartialTakeover(IItemHandler inventory, CallbackInfo ci) {
+        if (PartialRepackager.tryTakeover((RepackagerBlockEntity) (Object) this, inventory))
+            ci.cancel();
+    }
 
     /**
      * Redirect the {@code queuedExitingPackages.addAll(boxesToExport)} call in

@@ -82,6 +82,10 @@ public class ConnectivityHandlerMixin {
 
         // Idempotent: safe if the pool was already drained or never existed.
         SharedPackagePool.get(server).drainAndDrop(oldBox, level, pos);
+        // Also drop leftover raw materials of partially-repacked (taken-over)
+        // orders — they're unconsumed crafting materials held in SavedData,
+        // not packages. In-vault fragments drop separately via vanilla breakage.
+        com.github.goddamnrepackager.PartialOrderTracker.get(server).drainAndDrop(oldBox, level, pos);
         // Drop the tracked last-known box so a future reshape on a re-formed
         // vault at this position doesn't migrate from a stale baseline.
         com.github.goddamnrepackager.VaultBoxTracker.forget(vault);
