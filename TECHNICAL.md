@@ -44,18 +44,29 @@ Create 6.0 引入了全新的"包裹物流系统"。一个典型的自动化合�
 
 ## 2. 模组架构
 
-整个模组只有一个 Mixin 类 + 一个主类，极其精简：
+模组结构(0.4.0 共享池架构,4 个 mixin + 主类 + 3 个工具类):
 
 ```
 src/main/java/com/github/goddamnrepackager/
-├── GodDamnRepackager.java          # @Mod 主类，几乎只做日志 + DEBUG 开关
+├── GodDamnRepackager.java          # @Mod 主类,几乎只做日志 + DEBUG 开关
+├── SharedPackagePool.java          # ★ 世界级 SavedData:per-vault 共享包裹池
+├── VaultIdentity.java              # 工具类:解析理包机所连 vault 的稳定 BoundingBox
+├── VaultBoxTracker.java            # 工具类:WeakHashMap 追踪 controller 的 last-known box(reshape 迁移用)
 └── mixin/
-    └── RepackagerBlockEntityMixin.java   # 唯一的核心逻辑
+    ├── RepackagerBlockEntityMixin.java   # @Redirect addAll → 整批入池
+    ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机 poll(注父类 + instanceof 守卫)
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti HEAD → vault 销毁时 drop 池
+    └── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated HEAD → vault reshape 时迁移池 key
 
 src/main/resources/
-├── goddamnrepackager.mixins.json   # Mixin 配置
-└── META-INF/mods.toml              # Forge mod 元数据
+├── goddamnrepackager.mixins.json   # Mixin 配置(compatibilityLevel JAVA_21)
+└── pack.mcmeta                     # resource pack 元数据(pack_format 34)
+
+src/main/templates/META-INF/
+└── neoforge.mods.toml              # NeoForge mod 元数据(含 [[mixins]] 表 + 依赖声明,由 generateModMetadata 做 ${...} 替换)
 ```
+
+> **NeoForge 迁移要点**:mixin 文件 + VaultIdentity + VaultBoxTracker **跨 Forge/NeoForge 零改动**(只 import `net.minecraft.*` / `com.simibubi.create.*` / `org.spongepowered.asm.mixin.*`,无任何 loader 特定包)。迁移改动集中在:主类入口(Forge→NeoForge event bus)、`SharedPackagePool` 的 NBT 序列化(SavedData API + Codec)、构建系统(build.gradle / mods.toml→neoforge.mods.toml / mixins.json JAVA 级别)。详见 `_research/MIGRATION_FEASIBILITY.md`。
 
 ### 2.1 注入点
 
@@ -136,9 +147,11 @@ if (pkg != null) queuedExitingPackages.add(pkg);  // 灌进私有队列尾部
 
 这一节记录踩过的坑，按"代价大小"排序。**每一个都是真实踩过、耗费多轮迭代的坑。**
 
-### 3.1 【最痛】ForgeGradle 6 的 Mixin 配置注册
+### 3.1 【最痛·历史】Mixin 配置注册(Forge 1.20.1 时代 MixinGradle,1.21.1 NeoForge 已彻底换机制)
 
-**症状**：Mixin 类编译进了 jar，但运行时 `@Inject` 从不触发，且**没有任何报错**。
+> **本节记录的是 master 分支(Forge 1.20.1)的痛点。`neoforge-1.21.1` 分支已不需要 MixinGradle——机制见下方"NeoForge 方案"。**
+
+**症状(Forge 1.20.1)**：Mixin 类编译进了 jar，但运行时 `@Inject` 从不触发，且**没有任何报错**。
 探针日志一行都没有，但主类的构造函数日志正常打印。
 
 **根因**：ForgeGradle 6 的 `UserDevExtension` **移除了** `mixin {}` 配置块。
@@ -155,7 +168,7 @@ if (pkg != null) queuedExitingPackages.add(pkg);  // 灌进私有队列尾部
 - 项目顶层 `mixin {}` 块 → `Could not find method mixin()`
 - `minecraft { mixin {} }` → `UserDevExtension` 无此方法
 
-**正确解法**：引入 **MixinGradle 插件**（`org.spongepowered.mixin`）：
+**解法(Forge 1.20.1)**：引入 **MixinGradle 插件**（`org.spongepowered.mixin`）：
 
 ```groovy
 plugins {
@@ -171,6 +184,25 @@ mixin {
 
 MixinGradle 在项目顶层重新引入 `mixin {}` 扩展，负责生成 refmap + 把配置接入 dev 环境。
 **这是 FG6 + Mixin 的唯一可靠方式。**
+
+---
+
+#### NeoForge 1.21.1 方案(本分支现行)
+
+NeoForge 把 Mixin **内嵌进加载器本体**,不再需要 MixinGradle 插件,也不再读 jar manifest 的 `MixinConfigs` 属性。**配置机制完全换掉了**:
+
+1. **`neoforge.mods.toml` 里的 `[[mixins]]` 表**(在 `src/main/templates/META-INF/`,由 `generateModMetadata` 任务做 `${...}` 替换):
+   ```toml
+   [[mixins]]
+   config="${mod_id}.mixins.json"
+   ```
+   NeoForge 靠这个表发现 mixin 配置文件。
+
+2. **build.gradle 不再有 `mixin {}` 块**——ModDevGradle 不需要它。也不需要 refmap 重映射相关配置(`mixin.env.remapRefMap` / `refMapRemappingFile`)——official mappings 下方法名就是字面名,refmap 不需要。
+
+3. **jar manifest 不再有 `MixinConfigs` 属性**——NeoForge 不读它。
+
+迁移踩坑:从 1.20.1 master 分支把 build.gradle 搬过来时,**必须删掉 MixinGradle 插件 + `mixin {}` 块 + 所有 refmap 配置**,否则会和 ModDevGradle 冲突。本分支的 `build.gradle` 已经是干净的 NeoForge 形态。
 
 ### 3.2 【次痛】`refmap` 重复导致 jar 打包失败
 
@@ -381,6 +413,22 @@ handler 用 `(BlockEntity, CallbackInfo)` 即可）。它不覆盖 add-block res
 正确做法：用 `getControllerBE()`（在 HEAD 时 controller 字段还没被 null，返回真实 controller）。已在
 `ConnectivityHandlerMixin` 里这么做。
 
+> **1.21.1 升级版 footgun**:`isController()` 逻辑变了,变得更阴险:
+> ```java
+> public boolean isController() {
+>     return controller == null || worldPosition.getX() == controller.getX()
+>         && worldPosition.getY() == controller.getY()
+>         && worldPosition.getZ() == controller.getZ();
+> }
+> ```
+> 注意运算符优先级:`||` 低于 `&&`,等价于 `controller == null || (三轴坐标全等)`。含义:
+> - 正常 controller:`controller == null` → true ✓
+> - 正常 part:`controller != null` + 坐标不等 → false ✓
+> - **teardown 后的 part**:`removeController()` 把 `controller = null`,于是 `controller == null` → **true**(footgun 仍在,根因没变)
+> - 新增陷阱:某 part 的 `worldPosition` 恰好等于 controller 字段记录的坐标(罕见)也判 true。
+>
+> 结论不变:**`getControllerBE()` 仍是唯一可靠判定**。`ConnectivityHandlerMixin` 已经用 `getControllerBE()`,1.21.1 下无需改动。
+
 **④ vault-centric 归属：打掉理包机不爆，打掉/扩建 vault 才爆**
 
 共享池存在 SavedData 里，与 BlockEntity 独立。这导致一个根本行为变化（README/PUBLISH 已告知玩家）：
@@ -562,39 +610,48 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
    **结束后**（completedOrderId 仍 -1 时）主动塞料 + 触发，而非在 `addPackageFragment` 单次调用触发。
 3. **多机并发是独立难题**：需要 per-tick 去重，避免多机重复处理同一订单。
 
-**当前状态**：模组停留在 0.4.0（共享池），部分重组未实现。jar 名仍为
-`goddamnrepackager-0.4.0-alpha.jar`。
+**当前状态**：模组停留在 0.4.0（共享池），部分重组未实现。jar 名(neoforge 分支)为
+`goddamnrepackager-0.4.0-neoforge-alpha.jar`。
 
 ---
 
 ## 5. 开发环境复现
 
+> **本节针对 `neoforge-1.21.1` 分支。** master 分支(Forge 1.20.1)的构建环境见 master 的 TECHNICAL.md。
+
 如需从源码构建：
 
-1. 安装 **JDK 17**（必须是 17，不能是 21/22）
-2. `git clone` 本仓库
-3. 用仓库里的 `g.sh` 包装脚本运行 gradle（它会把 `JAVA_HOME` 钉到 JDK 17）：
+1. 安装 **JDK 21+**(本机用 JDK 22 也行,能编译 Java 21 target;MC 1.21.1 要求 Java 21)
+2. `git clone` 本仓库,`git checkout neoforge-1.21.1`
+3. 用仓库里的 `g.sh` 包装脚本运行 gradle:
    ```bash
    ./g.sh clean build      # 编译 + 打 jar
    ./g.sh runClient        # 启动开发环境游戏（含 Create + JEI）
    ```
 4. 发布 jar 在 `build/libs/` 下。**alpha 阶段的 jar 带有 `-alpha` 后缀**，例如
-   `goddamnrepackager-0.4.0-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
+   `goddamnrepackager-0.4.0-neoforge-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
    通过给 `jar` 任务设 `archiveClassifier = 'alpha'` 实现）。脱离 alpha 后把 `mod_is_alpha` 改为
    `false`，jar 名即变为 `goddamnrepackager-<version>.jar`。
 
-> `g.sh` 是必须的——直接 `./gradlew` 会用系统默认 Java（可能是 22），导致
-> `Unsupported class file major version 66` 错误。
+> **`g.sh` 做三件事**(直接 `./gradlew` 会漏掉):
+> 1. 钉 `JAVA_HOME` 到 JDK 22
+> 2. **路由 Gradle HTTPS 到本地 VPN 代理 `127.0.0.1:10808`** —— `maven.neoforged.net` 在中国大陆被 GFW SNI 重置,NeoForge SDK 拉不下来。`g.sh` 通过 JVM 系统属性 `https.proxyHost/Port` 让 Gradle 走代理。**前提:你的 VPN 客户端开着,本地代理端口是 10808**(端口不同就改 `g.sh`)。设环境变量 `GDR_NO_PROXY=1` 可禁用(网络直连可达 neoforge maven 时用)。
+> 3. 调 `./gradlew`
 
-### 关键依赖（见 `build.gradle`）
+### 关键依赖（见 `build.gradle` / `gradle.properties`）
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
-| Minecraft | 1.20.1 | 目标版本 |
-| Forge | 47.2.0 | 加载器 |
-| Create | 6.0.8-289 | 被修改的模组（用 `:slim` + 显式 Ponder/Flywheel/Registrate） |
-| MixinGradle | 0.7-SNAPSHOT | Mixin 配置注册（FG6 必需，见 §3.1） |
-| JEI | 15.20.0.106 | 仅 dev 环境用，用于下合成订单测试 |
+| Minecraft | 1.21.1 | 目标版本 |
+| NeoForge | 21.1.219 | 加载器(ModDevGradle 2.0.141 拉取) |
+| Create | 6.0.10-281(maven build,对应 6.0.10 release) | 被修改的模组(`:slim` + 显式 Ponder/Flywheel/Vanillin/Registrate) |
+| Ponder | 1.0.82 | Create 的 UI/教学依赖(`net.createmod.ponder:ponder-neoforge`) |
+| Flywheel | 1.0.6 | Create 的渲染依赖(`flywheel-neoforge-api` + `flywheel-neoforge`) |
+| Vanillin | 1.1.3-41 | **1.21.1 新增**——Flywheel 的 UI 层拆出来了(Create runtime 必需) |
+| Registrate | MC1.21-1.3.0+67 | Create 的注册辅助 |
+| JEI | 19.21.0.247 | 仅 dev 环境用,用于下合成订单测试 |
+
+> **Mixin 配置**:不再有 MixinGradle 插件。NeoForge 内嵌 Mixin,通过 `neoforge.mods.toml` 的 `[[mixins]]` 表发现配置(见 §3.1)。
 
 ---
 
@@ -613,8 +670,8 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 
 | 现象 | 可能原因 |
 |---|---|
-| Mixin 不触发，无报错 | MixinGradle 没配好，refmap 没生成（见 §3.1） |
-| `mixin class is invalid` | refmap 缺失或 target 描述符错（见 §3.1） |
+| Mixin 不触发，无报错 | **NeoForge**: `neoforge.mods.toml` 里漏了 `[[mixins]] config="..."` 表项,或文件名拼错(NeoForge 靠这个发现 mixin 配置,不再读 manifest 的 `MixinConfigs`)。**Forge 1.20.1**: MixinGradle 没配好,refmap 没生成(见 §3.1) |
+| `mixin class is invalid` | refmap 缺失或 target 描述符错(见 §3.1) |
 | 进世界崩溃 `InvalidInjectionException`（Expected ...SearchCache... but found） | 0.4.0：注了 private `splitMultiAndInvalidate` 且 handler 跳过了 SearchCache 参数。Mixin 要求 handler 匹配目标完整参数列表。改注 public `splitMulti`（见 §3.9②） |
 | 游戏启动崩溃 `non-private static method`（checkMethodVisibility） | 0.4.0：mixin 类里有 public/static 普通方法。共享 helper 必须放独立工具类（见 §3.9⑤） |
 | 游戏启动崩溃（tick） | 0.4.0：tick 注入点写错（必须注父类 PackagerBlockEntity + instanceof 守卫，见 §3.9①） |

@@ -7,7 +7,9 @@
 
 ## 1. 项目一句话
 
-一个 Forge 1.20.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度。当前处于 **alpha (0.4.0)**(共享包裹池架构)。
+一个 NeoForge 1.21.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度。当前处于 **alpha (0.4.0-neoforge)**(共享包裹池架构,1.20.1 Forge → 1.21.1 NeoForge 移植版)。
+
+> **双分支维护**: `master` 是 Forge 1.20.1 稳定线,`neoforge-1.21.1` 是 NeoForge 1.21.1 移植线。两线 API 不同(Create 6.0.8 Forge vs 6.0.10 NeoForge),**无法 merge**,各自独立演进。本文件描述的是 `neoforge-1.21.1` 分支的状态。
 
 ---
 
@@ -15,8 +17,12 @@
 
 ### 必须用 `./g.sh`
 
-- 仓库里提供了 `g.sh` 包装脚本，它会把 `JAVA_HOME` 钉到 **JDK 17**。
-- **不要用 `./gradlew`**——系统默认 Java 可能是 21/22，会导致 `Unsupported class file major version 66` 错误。
+- 仓库里提供了 `g.sh` 包装脚本，它会把 `JAVA_HOME` 钉到 **JDK 22**(JDK 22 能编译 Java 21 target;MC 1.21.1 要求 Java 21)。
+- **不要用 `./gradlew`**——系统默认 Java 可能版本不对,且 `g.sh` 还做了两件关键的事(见下)。
+- **`g.sh` 做的三件事**:
+  1. 钉 `JAVA_HOME` 到 JDK 22
+  2. **路由 Gradle HTTPS 流量到本地 VPN 代理 `127.0.0.1:10808`**(因为 `maven.neoforged.net` 被 GFW SNI 重置,NeoForge SDK 拉不下来)。**你的 VPN 客户端必须开着,且本地代理端口是 10808**(端口不同就改 `g.sh`)。设环境变量 `GDR_NO_PROXY=1` 可禁用代理(网络环境直连可达 neoforge maven 时用)。
+  3. 调用 `./gradlew`
 - 常用命令：
   ```bash
   ./g.sh clean build      # 编译 + 打 jar
@@ -25,7 +31,7 @@
 
 ### 产出的 jar
 
-- `build/libs/goddamnrepackager-0.4.0-alpha.jar`。
+- `build/libs/goddamnrepackager-0.4.0-neoforge-alpha.jar`。
 - alpha 后缀由 `gradle.properties` 的 `mod_is_alpha=true` 控制(给 `jar` 任务设 `archiveClassifier = 'alpha'`)。脱离 alpha 后改 `false` 即可去掉后缀。
 
 ### 验证方式
@@ -74,7 +80,7 @@ src/main/java/com/github/goddamnrepackager/
 | `heldBox` 字段的**赋值/清空** | 清空是被动的(下游 `PackagerItemHandler.extractItem` 抽走才清)，打断此协议会死锁，物品复制/丢失风险极高 | TECHNICAL.md §3.8 |
 | 父类 `PackagerBlockEntity.tick()` 里 offset 67-132 的取件逻辑(`get(0)`/`count--`/`remove`) | 这是发送状态机的心脏，且 Repackager **不重写 tick**。0.4.0 只在 tick HEAD 灌队列(策略 A)，**不拦 get(0)**(那是策略 B，高危)。注 tick 必须 `@Mixin(PackagerBlockEntity.class)` + `instanceof` 守卫 | TECHNICAL.md §3.8、§3.9①、§4.1 |
 | `BigItemStack.count` 的语义 | `count` 是"该包裹要发几次"，不是"包裹有几个"。pool.poll() 按 count 拆分(>1 只取 1 份)，drainAndDrop 按 count 全量 drop | TECHNICAL.md §3.5 |
-| Mixin 配置注册 | FG6 移除了 `mixin {}` 块，必须靠 MixinGradle 插件 + `mixin {}` 顶层块注册，否则 Mixin 编译进 jar 但运行时不触发 | TECHNICAL.md §3.1 |
+| Mixin 配置注册 | NeoForge 不再用 MixinGradle / `mixin {}` 块 / jar manifest 的 `MixinConfigs` 属性。改成 `neoforge.mods.toml` 里的 `[[mixins]] config="..."` 表(NeoForge 靠这个发现 mixin 配置)。Mixin 本体已内嵌进 NeoForge。**Forge 1.20.1 的 MixinGradle 方案在本分支完全作废** | TECHNICAL.md §3.1 |
 | `splitMulti` vs `splitMultiAndInvalidate` + `isController()` footgun | vault 销毁只能注 public `splitMulti`(break/wrench 覆盖)；reshape 另用 `notifyMultiUpdated` 迁移 key。private `splitMultiAndInvalidate` 因 SearchCache 是 package-private **无法注入**(Mixin 要求 handler 匹配完整参数列表)。teardown 后 `isController()` 谎报 true，必须用 `getControllerBE()` | TECHNICAL.md §3.9②③⑥ |
 | tick HEAD 灌队列必须守 `redstonePowered` | vanilla tick() 本身无红石检查(靠 lazyTick GATE 1)，我们的 tick 注入直接灌队列会绕过红石门。加 `if (!self.redstonePowered) return;`(见 §3.9⑦) | TECHNICAL.md §3.9⑦ |
 
@@ -96,13 +102,20 @@ src/main/java/com/github/goddamnrepackager/
 
 ### 不要凭记忆猜 Create API
 
-这个项目的许多决策靠反编译 Create 字节码做依据。分析流程:
-1. 找到 gradle 缓存里的 jar:
-   - slim jar(含 PackagerBlockEntity 等):`~/.gradle/caches/forge_gradle/deobf_dependencies/com/simibubi/create/create-1.20.1/6.0.8-289_mapped_official_1.20.1/...-slim.jar`
-   - all jar(含 RepackagerBlockEntity 等):同上目录 `...-291_...-all.jar`(版本号可能更新)
-2. 用 `javap` 直接读 jar(不需解压):
+这个项目的许多决策靠读 Create 源码做依据。**首选方式:直接读 GitHub 源码**(NeoForge 用 Mojang official mappings,源码就是字面名,比反编译字节码易读)。
+
+1. **GitHub raw 源码**(推荐):Create 的 1.21.1 dev 分支在 `Creators-of-Create/Create` 的 `mc1.21.1/dev`。常用源文件已缓存在 `_research/create-1.21.1-src/`(2026-07-17 快照,含 BigItemStack/ConnectivityHandler/PackagerBlockEntity/RepackagerBlockEntity/ItemVaultBlockEntity/InventoryIdentifier/IdentifiedInventory/InvManipulationBehaviour/IMultiBlockEntityContainer)。如果 Create 升级了,用 curl 拉新版:
    ```bash
-   "/c/Program Files/Microsoft/jdk-17.0.11.9-hotspot/bin/javap" -p -c -classpath "JAR路径" 全限定类名
+   curl -sL "https://raw.githubusercontent.com/Creators-of-Create/Create/mc1.21.1/dev/src/main/java/com/simibubi/create/content/logistics/BigItemStack.java"
+   ```
+2. **反编译字节码**(需要确认字段修饰符 / 方法实际描述符 / ordinal 时用)。先在 gradle 缓存里找 jar:
+   ```bash
+   find ~/.gradle/caches -name "create-1.21.1-*-slim.jar" 2>/dev/null
+   find ~/.gradle/caches -name "neoforge-*-universal.jar" 2>/dev/null
+   ```
+   然后用 JDK 22 的 javap 直接读 jar(不需解压):
+   ```bash
+   "/c/Program Files/Java/jdk-22/bin/javap" -p -c -classpath "JAR路径" 全限定类名
    ```
 3. **不要用 `unzip -o`**(plan mode 拦截写操作)。解压用全新临时目录:`mkdir -p /tmp/xxx && cd /tmp/xxx && unzip -q JAR 'path/*.class'`。
 4. 分析方法先看字段(`-p` 列出修饰符和类型)，再看关键方法字节码(`-c`)。找 `getfield`/`putfield` 定位字段使用、`invokevirtual/invokeinterface` 定位调用链。
@@ -110,14 +123,20 @@ src/main/java/com/github/goddamnrepackager/
 
 ### 关键类的位置
 
-| 类 | 所在 jar | 用途 |
+> **注意**:1.21.1 起 Create 不再像 1.20.1 那样分 slim/all jar——slim jar 现在包含所有 `com.simibubi.create.*` 类(包括 RepackagerBlockEntity)。读字节码时只用找 `create-1.21.1-*-slim.jar` 一个 jar 就够了。
+
+| 类 | 包路径 | 用途 |
 |---|---|---|
-| `RepackagerBlockEntity` | all jar | 理包机，重写了 `attemptToSend`/`attemptToRepackage`，**不重写 tick** |
-| `PackagerBlockEntity` | slim jar | 父类，`tick()`/发送状态机/`heldBox`/`queuedExitingPackages` 都在这里 |
-| `PackagerItemHandler` | slim jar | heldBox 的唯一清空点(`extractItem` → `setStackInSlot`) |
-| `InvManipulationBehaviour` | slim jar | 理包机的 `targetInventory`，`getIdentifiedInventory()` |
-| `ItemVaultBlockEntity` | all jar | 保险库，`initCapability()`/`getInvId()` |
-| `InventoryIdentifier` | all jar | 稳定库存标识，`Bounds(BoundingBox)` 用于 vault |
+| `RepackagerBlockEntity` | `content.logistics.packager.repackager` | 理包机，重写了 `attemptToSend`/`attemptToRepackage`，**不重写 tick** |
+| `PackagerBlockEntity` | `content.logistics.packager` | 父类，`tick()`/发送状态机/`heldBox`/`queuedExitingPackages` 都在这里 |
+| `PackagerItemHandler` | `content.logistics.packager` | heldBox 的唯一清空点(`extractItem` → `setStackInSlot`) |
+| `InvManipulationBehaviour` | `foundation.blockEntity.behaviour.inventory` | 理包机的 `targetInventory`，`getIdentifiedInventory()` |
+| `ItemVaultBlockEntity` | `content.logistics.vault` | 保险库，`initCapability()`/`getInvId()`/`notifyMultiUpdated()` |
+| `InventoryIdentifier` | `api.packager` | 稳定库存标识(record `Bounds(BoundingBox)` 用于 vault) |
+| `IdentifiedInventory` | `content.logistics.packager` | record(`@Nullable InventoryIdentifier identifier, IItemHandler handler`) |
+| `BigItemStack` | `content.logistics` | `count` 字段 + `Codec<BigItemStack> CODEC`(1.21.1 起 `read/write` 移除) |
+| `ConnectivityHandler` | `api.connectivity` | `splitMulti`(泛型,擦除到 `BlockEntity`) / `splitMultiAndInvalidate`(private) |
+| `IMultiBlockEntityContainer` | `foundation.blockEntity` | 多方块接口(1.21.1 有嵌套 `Inventory`/`Fluid` 子接口) |
 
 ---
 
@@ -135,7 +154,7 @@ src/main/java/com/github/goddamnrepackager/
 
 ### alpha jar 后缀规则
 
-- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.4.0-alpha.jar`。
+- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.4.0-neoforge-alpha.jar`(neoforge 分支)。
 - 文档里 jar 文件名示例要匹配(README 的安装步骤)。
 - TECHNICAL.md §5 记录了此约定。
 - 脱离 alpha 时:改 `gradle.properties` 的 `mod_is_alpha=false` + 去掉文档里 `-alpha` 后缀。
@@ -151,7 +170,7 @@ src/main/java/com/github/goddamnrepackager/
 
 以下 TECHNICAL.md 小节是**每次改动前应至少速览的**(它们记录了真实踩过的坑):
 
-- **§3.1**:MixinGradle 配置(忘了的话 Mixin 不会触发)
+- **§3.1**:Mixin 配置注册(NeoForge: `neoforge.mods.toml` 的 `[[mixins]]` 表;Forge 1.20.1 的 MixinGradle 方案在本分支已作废)
 - **§3.5**:`BigItemStack.count` 才是包裹数(按元素数切分是错的)
 - **§3.7**:能力实例代次不一致导致 `==` 失效(已修复,但理解原理能避开类似陷阱)
 - **§3.8**:heldBox 被动清空协议(动发送状态机前必读)
