@@ -31,18 +31,20 @@ neoForge {
         mappingsVersion = "2024.11.17"
     }
 
+    // Register our mod's source set. This MUST be at the neoForge{} top level (not inside
+    // runs.configureEach) — putting it inside runs{} causes "Duplicate source set 'main'"
+    // at runClient time, because ModDevGradle also auto-registers the mod. Mirrors Create's layout.
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+
     runs {
         configureEach {
             // Recommended logging level for the console
             systemProperty 'neoforge.logging.console.level', 'info'
             systemProperty 'neoforge.logging.markers', ''
-
-            // Make our own mod's sources available to the run
-            mods {
-                "${mod_id}" {
-                    sourceSet sourceSets.main
-                }
-            }
         }
 
         client {
