@@ -7,7 +7,7 @@
 
 ## 1. 项目一句话
 
-一个 NeoForge 1.21.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度。当前处于 **alpha (0.4.0-neoforge)**(共享包裹池架构,1.20.1 Forge → 1.21.1 NeoForge 移植版)。
+一个 NeoForge 1.21.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度；0.5.0 起还支持「部分重组」——碎片够合成 ≥1 次即开工，不必等全单碎片到齐。当前处于 **alpha (0.5.0-neoforge)**(共享包裹池 + 部分重组,1.20.1 Forge → 1.21.1 NeoForge 移植版)。
 
 > **双分支维护**: `master` 是 Forge 1.20.1 稳定线,`neoforge-1.21.1` 是 NeoForge 1.21.1 移植线。两线 API 不同(Create 6.0.8 Forge vs 6.0.10 NeoForge),**无法 merge**,各自独立演进。本文件描述的是 `neoforge-1.21.1` 分支的状态。
 
@@ -42,6 +42,10 @@
   - `[GDR-POOL] deposited`:理包机整理后整批入共享池
   - `[GDR-POOL] fed`:空闲理包机从池里取 1 个包
   - `[GDR-POOL] drained & dropped`:vault 销毁/扩建时池爆出实体
+  - `[GDR-PARTIAL] crafted`:部分重组渐进合成了一包(0.5.0)
+  - `[GDR-PARTIAL] final pass`:订单末班收尾、tracker 注销(0.5.0)
+  - `[GDR-PARTIAL] drained`:vault 销毁爆出托管余料(0.5.0)
+  - `[GDR-PARTIAL] migrated`:vault reshape 迁移 tracker key(0.5.0)
 
 ---
 
@@ -53,25 +57,30 @@
 src/main/java/com/github/goddamnrepackager/
 ├── GodDamnRepackager.java          # @Mod 主类，只有日志+DEBUG_LOGGING 开关
 ├── SharedPackagePool.java          # ★ 世界级 SavedData：per-vault 共享包裹池(deposit/poll/migrateKey/drainAndDrop)
+├── PartialRepackager.java          # ★ 0.5.0 部分重组逻辑(预扫描/部分趟/末班，纯静态方法)
+├── PartialOrderTracker.java        # ★ 0.5.0 世界级 SavedData：per-vault 接管订单的余料+已消费网格状态
 ├── VaultIdentity.java              # 工具类：vaultBoundingBoxOf(r) 返回 vault 的 BoundingBox(两个 mixin 共用)
 ├── VaultBoxTracker.java            # 工具类：WeakHashMap 追踪 controller 的 last-known box(reshape 迁移用)
 └── mixin/
-    ├── RepackagerBlockEntityMixin.java   # @Redirect addAll → 入池
+    ├── RepackagerBlockEntityMixin.java   # @Inject attemptToRepackage HEAD(部分接管,cancellable) + @Redirect addAll → 入池
     ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机从池 poll(注父类，instanceof 守卫，须 redstonePowered)
-    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 销毁(break/wrench)时 drop 池
-    └── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated(public) → vault reshape 时迁移池 key
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 销毁(break/wrench)时 drop 池 + drop 余料
+    ├── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated(public) → vault reshape 时迁移池 key + tracker key
+    └── PackageRepackageHelperInvoker.java # @Invoker repackBasedOnRecipes(protected → 调用桥，0.5.0)
 ```
 
-> **注意**：mixin 类里**不能有 public/static 普通方法**——mixin 方法会被合并进目标类，非 private 的 static 方法会被 Mixin transformer 拒绝（`checkMethodVisibility` 报 `non-private static method`）。共享 helper 必须放独立工具类（如 `VaultIdentity`），不能放 mixin 类里。
+> **注意**：mixin 类里**不能有 public/static 普通方法**——mixin 方法会被合并进目标类，非 private 的 static 方法会被 Mixin transformer 拒绝（`checkMethodVisibility` 报 `non-private static method`）。共享 helper 必须放独立工具类（如 `VaultIdentity`），不能放 mixin 类里。**例外**：`@Accessor`/`@Invoker` 写在 interface mixin 里是调用桥(transformer 生成、非合并方法)，不受此限制(见 `PackageRepackageHelperInvoker`)。
 
-### 当前注入点(mixin 里，三个)
+### 当前注入点(mixin 里，六个)
 
 | 注入 | 方法 | 用途 |
 |---|---|---|
-| `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | **整批入池**:winner repack 后 deposit 进共享池(不入私有队列) |
+| `@Inject(@At("HEAD"), cancellable)` | `RepackagerBlockEntity.attemptToRepackage` | **0.5.0 部分重组**:零副作用预扫描，命中部分/末班趟则 cancel vanilla(见 TECHNICAL.md §2.4) |
+| `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | **整批入池**:winner repack 后(完整订单走 vanilla 时)deposit 进共享池(不入私有队列) |
 | `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`(注**父类**!) | **策略 A 灌队列**:空闲理包机每 tick 从池 poll 1 个包进私有队列。handler 内 `instanceof Repackager` 早退 |
-| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 销毁 drop 池**:drainAndDrop 该 vault 的池成实体 |
-| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`(public) | **vault reshape 迁移池 key**:旧 BoundingBox → 新 BoundingBox(包不爆不丢) |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 销毁 drop 池+余料**:drainAndDrop 该 vault 的池与 PartialOrderTracker 余料成实体 |
+| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`(public) | **vault reshape 迁移 key**:旧 BoundingBox → 新 BoundingBox(池 + tracker，包不爆不丢) |
+| `@Invoker` | `PackageRepackageHelper.repackBasedOnRecipes`(protected) | **0.5.0**:暴露 protected 方法供部分趟渐进合成(interface mixin) |
 
 ### 绝对不要碰的东西(除非你读透了对应小节)
 
@@ -83,11 +92,15 @@ src/main/java/com/github/goddamnrepackager/
 | Mixin 配置注册 | NeoForge 不再用 MixinGradle / `mixin {}` 块 / jar manifest 的 `MixinConfigs` 属性。改成 `neoforge.mods.toml` 里的 `[[mixins]] config="..."` 表(NeoForge 靠这个发现 mixin 配置)。Mixin 本体已内嵌进 NeoForge。**Forge 1.20.1 的 MixinGradle 方案在本分支完全作废** | TECHNICAL.md §3.1 |
 | `splitMulti` vs `splitMultiAndInvalidate` + `isController()` footgun | vault 销毁只能注 public `splitMulti`(break/wrench 覆盖)；reshape 另用 `notifyMultiUpdated` 迁移 key。private `splitMultiAndInvalidate` 因 SearchCache 是 package-private **无法注入**(Mixin 要求 handler 匹配完整参数列表)。teardown 后 `isController()` 谎报 true，必须用 `getControllerBE()` | TECHNICAL.md §3.9②③⑥ |
 | tick HEAD 灌队列必须守 `redstonePowered` | vanilla tick() 本身无红石检查(靠 lazyTick GATE 1)，我们的 tick 注入直接灌队列会绕过红石门。加 `if (!self.redstonePowered) return;`(见 §3.9⑦) | TECHNICAL.md §3.9⑦ |
+| 部分重组的五条不变量(0.5.0) | 改 `PartialRepackager`/`PartialOrderTracker` 前必须逐条核对 §3.10：①绝不在 `addPackageFragment` 层触发 repack；②预扫描零副作用；③部分趟只调 `repackBasedOnRecipes`、末班才调 `repack()`；④count≤0 盒必须过滤(`SharedPackagePool.deposit` 已守)；⑤余料只托管 SavedData，绝不塞回保险库。违反任一条都会丢/复制物品 | TECHNICAL.md §3.10、§4.3 |
 
 ### 复用现有 helper(不要重新发明)
 
 - `SharedPackagePool.get(server)` — 取世界级池实例(SavedData)
 - `SharedPackagePool.deposit(vault, batch)` / `poll(vault)` / `pending(vault)` / `drainAndDrop(vault, level, pos)` — 池操作
+- `PartialRepackager.tryTakeover(self, inv)` — 0.5.0 部分重组入口(由 `RepackagerBlockEntityMixin` 在 attemptToRepackage HEAD 调，返回 true 表示已处理需 cancel vanilla)
+- `PartialOrderTracker.get(server)` — 0.5.0 取世界级 tracker 实例(SavedData)。`get`/`update`/`forget`/`migrateKey`/`drainAndDrop` 与 SharedPackagePool 同生命周期模式
+- `PackageRepackageHelperInvoker.goddamnrepackager$repackBasedOnRecipes(...)` — 0.5.0 调用桥(cast helper 到此 interface)，部分趟渐进合成
 - `VaultIdentity.vaultBoundingBoxOf(r)` — 返回理包机所连 vault 的 `BoundingBox`(从 `InventoryIdentifier.Bounds.bounds()` 取，**不要用 `IItemHandler ==`**，§3.7)。独立工具类(非 mixin)，两个 mixin 共用
 
 ### 访问 Create 字段的约定
@@ -175,6 +188,7 @@ src/main/java/com/github/goddamnrepackager/
 - **§3.7**:能力实例代次不一致导致 `==` 失效(已修复,但理解原理能避开类似陷阱)
 - **§3.8**:heldBox 被动清空协议(动发送状态机前必读)
 - **§3.9**:0.4.0 共享池的七个核心陷阱(tick 注父类 / splitMulti 可见性 / reshape 用 notifyMultiUpdated 迁移 / isController footgun / vault-centric 归属 / mixin 类不能有 public static 方法 / tick HEAD 必须守 redstonePowered)
+- **§3.10**:0.5.0 部分重组的五条不变量(改 `PartialRepackager`/`PartialOrderTracker` 前必读;§2.4 是架构,§4.3 是三次失败 + 第四次成功的全过程)
 - **§4.1**:思路B 两条路径(路径①0.3.0 实现已废弃,路径②0.4.0 共享池已实现;策略 A vs B 取舍)
 
 TECHNICAL.md 的 §6(常见问题排查表)和 §5(构建复现)也是日常会用到的。

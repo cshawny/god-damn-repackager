@@ -44,19 +44,22 @@ Create 6.0 引入了全新的"包裹物流系统"。一个典型的自动化合�
 
 ## 2. 模组架构
 
-模组结构(0.4.0 共享池架构,4 个 mixin + 主类 + 3 个工具类):
+模组结构(0.5.0 共享池 + 部分重组架构,5 个 mixin + 主类 + 5 个工具类):
 
 ```
 src/main/java/com/github/goddamnrepackager/
 ├── GodDamnRepackager.java          # @Mod 主类,几乎只做日志 + DEBUG 开关
 ├── SharedPackagePool.java          # ★ 世界级 SavedData:per-vault 共享包裹池
+├── PartialRepackager.java          # ★ 0.5.0 部分重组逻辑(预扫描/部分趟/末班,纯静态方法)
+├── PartialOrderTracker.java        # ★ 0.5.0 世界级 SavedData:per-vault 接管订单的余料+网格状态
 ├── VaultIdentity.java              # 工具类:解析理包机所连 vault 的稳定 BoundingBox
 ├── VaultBoxTracker.java            # 工具类:WeakHashMap 追踪 controller 的 last-known box(reshape 迁移用)
 └── mixin/
-    ├── RepackagerBlockEntityMixin.java   # @Redirect addAll → 整批入池
+    ├── RepackagerBlockEntityMixin.java   # @Inject attemptToRepackage HEAD(部分接管) + @Redirect addAll → 整批入池
     ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机 poll(注父类 + instanceof 守卫)
-    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti HEAD → vault 销毁时 drop 池
-    └── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated HEAD → vault reshape 时迁移池 key
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti HEAD → vault 销毁时 drop 池 + drop 余料
+    ├── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated HEAD → vault reshape 时迁移池 key + tracker key
+    └── PackageRepackageHelperInvoker.java # @Invoker repackBasedOnRecipes(protected → 调用桥,0.5.0)
 
 src/main/resources/
 ├── goddamnrepackager.mixins.json   # Mixin 配置(compatibilityLevel JAVA_21)
@@ -66,18 +69,20 @@ src/main/templates/META-INF/
 └── neoforge.mods.toml              # NeoForge mod 元数据(含 [[mixins]] 表 + 依赖声明,由 generateModMetadata 做 ${...} 替换)
 ```
 
-> **NeoForge 迁移要点**:mixin 文件 + VaultIdentity + VaultBoxTracker **跨 Forge/NeoForge 零改动**(只 import `net.minecraft.*` / `com.simibubi.create.*` / `org.spongepowered.asm.mixin.*`,无任何 loader 特定包)。迁移改动集中在:主类入口(Forge→NeoForge event bus)、`SharedPackagePool` 的 NBT 序列化(SavedData API + Codec)、构建系统(build.gradle / mods.toml→neoforge.mods.toml / mixins.json JAVA 级别)。详见 `_research/MIGRATION_FEASIBILITY.md`。
+> **NeoForge 迁移要点**:mixin 文件 + VaultIdentity + VaultBoxTracker **跨 Forge/NeoForge 零改动**(只 import `net.minecraft.*` / `com.simibubi.create.*` / `org.spongepowered.asm.mixin.*`,无任何 loader 特定包)。迁移改动集中在:主类入口(Forge→NeoForge event bus)、`SharedPackagePool` / `PartialOrderTracker` 的 NBT 序列化(SavedData API + Codec)、构建系统(build.gradle / mods.toml→neoforge.mods.toml / mixins.json JAVA 级别)。详见 `_research/MIGRATION_FEASIBILITY.md`。
 
 ### 2.1 注入点
 
-0.4.0 用四个注入点实现共享包裹池架构：
+0.5.0 用五个注入点实现共享包裹池 + 部分重组架构：
 
 | 注入 | 方法 | 用途 |
 |---|---|---|
-| `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | 整批入池：winner repack 后不再塞进自己队列，而是 deposit 进共享池 |
+| `@Inject(@At("HEAD"), cancellable)` | `RepackagerBlockEntity.attemptToRepackage` | **0.5.0 部分重组**：零副作用预扫描，命中部分/末班趟则 cancel vanilla（见 §2.4） |
+| `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | 整批入池：winner repack 后（完整订单走 vanilla 时）不再塞进自己队列，而是 deposit 进共享池 |
 | `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`（注父类，因为 Repackager 不重写 tick） | 策略 A：空闲理包机每 tick 从池里 poll 1 个包灌进自己私有队列（须 `redstonePowered`） |
-| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`（public，覆盖 break/wrench） | vault 销毁时 drop 池：把该 vault 的共享池清空并爆出实体 |
-| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`（public） | vault reshape 时迁移池 key：把旧 BoundingBox 的池迁到新 BoundingBox |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`（public，覆盖 break/wrench） | vault 销毁时 drop 池 + drop 余料：把该 vault 的共享池与 PartialOrderTracker 余料清空并爆出实体 |
+| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`（public） | vault reshape 时迁移池 key + tracker key：把旧 BoundingBox 的池与 tracker 迁到新 BoundingBox |
+| `@Invoker` | `PackageRepackageHelper.repackBasedOnRecipes`（protected） | **0.5.0**：暴露 protected 方法供部分趟渐进合成（interface mixin，非合并方法） |
 
 > 为什么 tick 注入点在父类 `PackagerBlockEntity` 而非 `RepackagerBlockEntity`：
 > Repackager **不重写** `tick()`（字节码已确认，见 §3.9）。Mixin 解析目标方法时按目标类自身
@@ -140,6 +145,59 @@ if (pkg != null) queuedExitingPackages.add(pkg);  // 灌进私有队列尾部
 - **vault 销毁/reshape 不吞包**：`ConnectivityHandlerMixin` 在 vault 销毁时 drainAndDrop，
   池里的包全爆成实体（见 §3.9 的 vault-centric 归属模型）
 - **不干扰原版碎片清理**：redirect 的 addAll 在原版清空保险库碎片逻辑之后执行，碎片逻辑不动
+
+### 2.4 部分重组（0.5.0 架构）：订单接管 + 余料托管 + 末班 vanilla 收尾
+
+原版 `isOrderComplete` 是 all-or-nothing 闸门：碎片网格（LinkIndex × Index 二维）不齐，
+理包机不动工。碎片经运输网络异步流式到达，大订单"等最后一片"窗口长。0.5.0 让理包机在
+**已到碎片够合成至少一次**时即开工。设计的关键字节码依据：
+
+- `repackBasedOnRecipes` **天生支持部分合成**——它按 `min(订单数, 材料够的次数)` 合成并
+  原地消耗材料池，all-or-nothing 只存在于 `isOrderComplete` 一层
+- **每个碎片都携带完整订单上下文**（`PackageOrderWithCrafts`，含全部配方与数量）——任意
+  一片到达即知整单要合成什么
+- **材料守恒自动限制总合成数**——stockkeeper 发货总量 == 订单总量，跨趟累计合成数被材料
+  卡住，无需跟踪"已合成次数"
+- vanilla `repack()` 是**订单收尾**语义（合成 + 余料全部导出），部分趟不能调它
+
+**生命周期**（`PartialRepackager.tryTakeover`，由 attemptToRepackage HEAD 注入触发）：
+
+```
+碎片到达 → [预扫描] 有订单完整? → 是 → 放行 vanilla(零分叉,走 0.4.0 原路径)
+                     ↓ 否
+              有订单够合成≥1次? → 否 → 放行 vanilla(空转)
+                     ↓ 是
+              【接管】部分趟:repackBasedOnRecipes 合成 → 产物入共享池
+                        余料存 PartialOrderTracker;按 orderId extract 碎片(消耗==删除)
+                     ↓ 更多碎片到达 → 部分趟……(材料驱动)
+                     ↓ 累计网格槽位全部消费完
+              【末班】余料打包成内存伪碎片注入 helper → vanilla repack() 收尾
+                     (合成剩余 + 余料按 vanilla 格式导出,末盒带完整 context) → 注销 tracker
+```
+
+- **预扫描**：逐字节码复刻 vanilla 扫描循环（simulated extract → isPackage → isFragmented →
+  addPackageFragment），零副作用。遇直通包裹或完整订单立即放行 vanilla。代价是 vanilla 路径
+  多一次扫描（每 lazyTick 每机 2 次而非 1 次），可接受
+- **接管不可逆**：消费任何碎片后网格出现空洞，vanilla `isOrderComplete` 对该订单永假——
+  之后由我们负责到末班。只要还有一台红石充能的理包机在 tick，订单必然推进
+- **末班判定**：`PartialOrderTracker.TrackedOrder.wouldComplete` 把 `isOrderComplete` 的
+  网格语义应用到**累计已消费槽位集合**上（而非 vanilla 的当前在场集合）
+- **多机并发**：服务器单线程天然串行化——同 tick 内一台理包机的 attemptToRepackage 完整
+  跑完（扫描+合成+extract）才轮到下一台，后者扫到空库自然退出。tracker 按 vault 共享，
+  多机接力推进同一订单
+- **红石门**：注入点在 `attemptToRepackage` 内部，继承 vanilla lazyTick 的红石门
+  （`if (!redstonePowered) return`），无需额外守卫
+
+**`PartialOrderTracker`（新增世界级 SavedData）**：与 `SharedPackagePool` 同生命周期模式——
+per-vault 按 `BoundingBox` 分桶，每个桶按 `orderId` 存一个 `TrackedOrder`（余料
+`InventorySummary` + 已消费槽位集合 + 网格边界 + 订单上下文/地址）。vault 销毁时
+`drainAndDrop` 把余料爆成原材料实体（与池包裹分别 drop，in-vault 碎片由 vanilla break 单独
+drop，三者不相交）；reshape 时 `migrateKey` 迁移；末班 `forget` 注销。
+
+> **NeoForge 序列化迁移**：1.21.1 起 `PackageOrderWithCrafts` / `InventorySummary` / `BigItemStack`
+> 都删除了 `read(CompoundTag)` / `write()`，改成 codec-only。`PartialOrderTracker` 的存档读写
+> 直接跑对应类的 `CODEC`（`registries.createSerializationContext(NbtOps.INSTANCE)`），与
+> `SharedPackagePool` 的 BigItemStack codec helper 同模式（见 §3.1 的 NeoForge SavedData 说明）。
 
 ---
 
@@ -492,6 +550,45 @@ formation 时触发，所以用"last-known box 变化"判定 reshape：
 正确的门——Repackager 把它 override 成恒 `true`（那是"模式选择器"，不是红石门）。deposit（redirect）
 不受影响——它发生在已被 lazyTick 红石门守住的 `attemptToSend` 路径里。
 
+### 3.10 【0.5.0 核心陷阱】部分重组的五条不变量（违反任何一条都会丢/复制物品）
+
+0.5.0 的部分重组是在三次失败尝试（§4.3）之上成功的。以下不变量是它的安全基石，
+**任何未来改动都必须逐条核对**：
+
+**① 绝不在 `addPackageFragment` 层面触发 repack**
+
+`addPackageFragment` 一返回非 -1，`attemptToRepackage` 的扫描循环立即 break——此时
+`collectedPackages` 只收了部分碎片，但后续 extract 循环按 orderId 删除**全库**碎片，
+消耗≠删除 = 丢物品（§4.3 尝试 2 的死因）。0.5.0 的预扫描**跑满全槽、无 early break**，
+只有 vanilla 自己检测到完整订单时才走 vanilla 路径。任何"提前触发"的优化都会重新打开这个洞。
+
+**② 预扫描必须零副作用**
+
+HEAD 注入里的预扫描只用 `extractItem(slot, 1, true)`（simulated），不写 heldBox、不做真实
+extract、不改库存 NBT。遇直通包裹（非碎片）或完整订单必须 `return false` 放行 vanilla——
+vanilla 会自己重扫并正确处理。若预扫描带了副作用，vanilla 路径与我们的路径会双重消费。
+
+**③ 部分趟只能调 `repackBasedOnRecipes`，末班才能调 `repack()`**
+
+`repack()` 是订单收尾语义：合成 + **把余料全部导出**给订单地址。部分趟调它会把未来合成的
+材料提前当余料寄走。只有末班（累计网格消费完毕）才能调 `repack()`——此时导出余料正是
+vanilla 的 close-out 行为。判断末班用 `TrackedOrder.wouldComplete`（累计槽位网格），
+不是用当前在场碎片。
+
+**④ count≤0 的产物盒必须过滤，绝不可发出**
+
+`repackBasedOnRecipes` 对每个配方都返回盒子，材料不够的配方 count=0——但盒子里仍装着
+1 份配方材料（pattern）。发出 count=0 的盒子 = 凭空造物（材料从未从池中消耗）。
+`SharedPackagePool.deposit` 只收 `count > 0`，这是最后一道闸；新增任何产物出口都必须
+沿用同样的过滤。
+
+**⑤ 余料只能托管在 SavedData，不可重新塞回保险库**
+
+把余料重新打包成碎片塞回保险库会撞上在途碎片的原始 (LinkIndex, Index) 编号——网格出现
+重复/空洞，`isOrderComplete` 语义崩坏，且每 tick 的 extract/insert 搅动巨大。余料存
+`PartialOrderTracker`(SavedData)，vault 销毁时爆成原材料实体，reshape 时迁移 key——
+与 SharedPackagePool 同生命周期模式。
+
 ---
 
 ## 4. 后续开发方向
@@ -550,14 +647,14 @@ heldBox 生命周期（§3.8），死锁/复制风险高——这正是原版估
 - **Create 版本跟进**：Create 更新后，`attemptToRepackage` 的行号 / `addAll` 的
   target 描述符可能变化。需要针对新版本重新验证注入点。
 
-### 4.3 【已挂起】部分重组（让理包机在部分材料到达时即开工）
+### 4.3 部分重组（0.5.0 已实现）：订单接管 + 余料托管 + 末班 vanilla 收尾
 
-**状态：需求有价值，但实现连续踩了三个坑，已回退挂起。本节如实记录全过程，供未来重做参考。**
+**状态：已实现。前三次尝试失败（attempt 1-3，下方保留作历史诊断），第四次（attempt 4）成功。**
 
 **目标**：原版 `isOrderComplete` 是 all-or-nothing 闸门（碎片网格不全即 false）。碎片经运输网络
 异步流式到达，大订单"等最后一片"窗口长。希望让理包机在已到碎片够合成至少一次时就开工。
 
-**三次失败尝试**：
+**历史失败尝试**（保留作陷阱实录，attempt 4 的成功正是规避了这三个坑）：
 
 #### 尝试 1（直接用 repackBasedOnRecipes 输出）— 物品复制 + 无限堆积
 
@@ -599,19 +696,36 @@ offset 108-113 立即 **break**。于是 `collectedPackages` 只收到 **1 个**
 后再触发 repack。但分析后发现仍有未验证细节（多机并发谁塞料、塞料与保险库实时状态的一致性、
 repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，**暂停实现，挂起需求**。
 
-**为什么这个需求这么难**：Create 的碎片/repack 机制有三个微妙耦合——
+#### 尝试 4（0.5.0，成功）— 订单接管 + 余料托管 + 末班 vanilla 收尾
+
+**关键转折**：第四次调研（全量字节码重读 `PackageRepackageHelper`/`PackageItem`/`PackagerBlockEntity`）
+推翻了三个阻碍前三次尝试的认知：
+
+1. **`repackBasedOnRecipes` 天生支持部分合成**——它按 `min(订单数, 材料够的次数)` 合成并原地消耗
+   材料池。all-or-nothing 只在 `isOrderComplete` 一层，合成层本来就是渐进的。
+2. **每个碎片都携带完整订单上下文**——打包机生成碎片时对每片 `setOrder(..., request.context())`。
+   任意一片到达即知整单配方，无需等齐。
+3. **材料守恒自动限制总合成数**——stockkeeper 发货总量 == 订单总量，跨趟累计合成数被材料卡住，
+   无需跟踪"已合成次数"（尝试 3 设想的最大复杂度凭空消失）。
+
+**路线**（详见 §2.4）：不撬 `isOrderComplete` 的闸门（完整订单照旧走 vanilla），只对**不完整**
+订单进行"接管"——部分趟用 `repackBasedOnRecipes` 渐进合成、余料托管 SavedData、末班用内存伪碎片
+回调 vanilla `repack()` 收尾。三个历史失败点全部结构性规避：
+
+- 尝试 1 的孤儿格式/复制：产物只出自 vanilla 方法 + addAddress；库存只走 `extractItem` 公开 API
+- 尝试 2 的消耗≠删除：预扫描跑满全槽无 early break，收集集合 == 删除集合（结构性保证）
+- 尝试 3 的未验证细节：多机并发由服务器单线程串行化自然解决；余料一致性由 SavedData 托管
+
+**为什么这个需求曾经这么难**：Create 的碎片/repack 机制有三个微妙耦合——
 - `isOrderComplete` 是 all-or-nothing 闸门，部分触发必然打破它隐含的"一次性全处理"语义；
 - `repack` 消耗 `collectedPackages`，但 extract 删保险库，两者集合必须手动保证相等；
 - 合成结果 box 带 Fragment，安全靠拓扑隔离（不回输入保险库），任何扰动都可能打破。
 
-**未来重做的建议**：
-1. **先用只读探针验证每一个假设**（像 §2.4 那次验证拓扑隔离一样），不要凭字节码推理直接写代码。
-2. **核心要解决"repack 消耗 == extract 删除"**：最可能的路径是在 `attemptToRepackage` 扫描循环
-   **结束后**（completedOrderId 仍 -1 时）主动塞料 + 触发，而非在 `addPackageFragment` 单次调用触发。
-3. **多机并发是独立难题**：需要 per-tick 去重，避免多机重复处理同一订单。
+第四次的洞察是：**不碰闸门，而是接管订单的整个生命周期**——闸门只服务 vanilla 路径，
+被接管的订单由 tracker 的累计网格判定末班，合成与收尾全部回调 vanilla 自己的方法。
 
-**当前状态**：模组停留在 0.4.0（共享池），部分重组未实现。jar 名(neoforge 分支)为
-`goddamnrepackager-0.4.0-neoforge-alpha.jar`。
+**当前状态**：模组为 0.5.0-neoforge（共享池 + 部分重组）。jar 名(neoforge 分支)为
+`goddamnrepackager-0.5.0-neoforge-alpha.jar`。
 
 ---
 
@@ -629,7 +743,7 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
    ./g.sh runClient        # 启动开发环境游戏（含 Create + JEI）
    ```
 4. 发布 jar 在 `build/libs/` 下。**alpha 阶段的 jar 带有 `-alpha` 后缀**，例如
-   `goddamnrepackager-0.4.0-neoforge-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
+   `goddamnrepackager-0.5.0-neoforge-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
    通过给 `jar` 任务设 `archiveClassifier = 'alpha'` 实现）。脱离 alpha 后把 `mod_is_alpha` 改为
    `false`，jar 名即变为 `goddamnrepackager-<version>.jar`。
 
@@ -663,6 +777,10 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 - 每次入池打印 `[GDR-POOL] deposited N package(s)` 行：理包机整理后整批入池的总量。
 - 每次空闲理包机取包打印 `[GDR-POOL] fed 1 package` 行：哪个理包机取了包、池里还剩多少。
 - 每次 vault 销毁/reshape 爆池打印 `[GDR-POOL] drained & dropped N package(s)` 行。
+- **（0.5.0）** 每次部分趟合成打印 `[GDR-PARTIAL] crafted N package(s) for order ...` 行：渐进合成了几包、消费了几片碎片。
+- **（0.5.0）** 末班收尾打印 `[GDR-PARTIAL] final pass for order ... N package(s) exported, tracker cleared` 行：订单收尾、tracker 注销。
+- **（0.5.0）** vault 销毁爆余料打印 `[GDR-PARTIAL] drained N item(s) from M tracked order(s)` 行。
+- **（0.5.0）** vault reshape 迁移 tracker 打印 `[GDR-PARTIAL] migrated N tracked order(s)` 行。
 - （0.3.0 的 `[GDR-DIST]` / `[GDR-REBAL]` / `SPLIT MISMATCH` / `REBALANCE MISMATCH` 已随快照+再平衡
   逻辑删除，0.4.0 不再出现。）
 

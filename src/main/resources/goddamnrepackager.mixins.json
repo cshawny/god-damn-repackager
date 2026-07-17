@@ -8,7 +8,8 @@
     "RepackagerBlockEntityMixin",
     "PackagerBlockEntityMixin",
     "ConnectivityHandlerMixin",
-    "ItemVaultBlockEntityMixin"
+    "ItemVaultBlockEntityMixin",
+    "PackageRepackageHelperInvoker"
   ],
   "client": [],
   "injectors": {
