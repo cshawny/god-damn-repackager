@@ -44,21 +44,23 @@ Create 6.0 引入了全新的"包裹物流系统"。一个典型的自动化合�
 
 ## 2. 模组架构
 
-模组结构(0.5.0 共享池 + 部分重组架构,5 个 mixin + 主类 + 5 个工具类):
+模组结构(0.5.1 共享池 + 部分重组 + UUID 身份架构,5 个 mixin + 主类 + 7 个工具类):
 
 ```
 src/main/java/com/github/goddamnrepackager/
 ├── GodDamnRepackager.java          # @Mod 主类,几乎只做日志 + DEBUG 开关
-├── SharedPackagePool.java          # ★ 世界级 SavedData:per-vault 共享包裹池
+├── SharedPackagePool.java          # ★ 世界级 SavedData:per-vault 共享包裹池(key 是 UUID，0.5.1)
 ├── PartialRepackager.java          # ★ 0.5.0 部分重组逻辑(预扫描/部分趟/末班,纯静态方法)
 ├── PartialOrderTracker.java        # ★ 0.5.0 世界级 SavedData:per-vault 接管订单的余料+网格状态
-├── VaultIdentity.java              # 工具类:解析理包机所连 vault 的稳定 BoundingBox
-├── VaultBoxTracker.java            # 工具类:WeakHashMap 追踪 controller 的 last-known box(reshape 迁移用)
+├── VaultIdentity.java              # 工具类:解析理包机所连 vault controller 的稳定 UUID(0.5.1)
+├── VaultExtraData.java             # record 载体(0.5.1):UUID 穿过 Create extraData Object 通道
+├── VaultGeometry.java              # 工具类(0.5.1):anySiblingVaultWithUuidExists 判定 partial vs full teardown
+├── ItemVaultBlockEntityVaultIdAccessor.java  # duck interface(0.5.1,**根包**非 mixin 包):UUID 字段桥
 └── mixin/
     ├── RepackagerBlockEntityMixin.java   # @Inject attemptToRepackage HEAD(部分接管) + @Redirect addAll → 整批入池
     ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机 poll(注父类 + instanceof 守卫)
-    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti HEAD → vault 销毁时 drop 池 + drop 余料
-    ├── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated HEAD → vault reshape 时迁移池 key + tracker key
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti HEAD → vault 全拆时 drop 池+余料(0.5.1:neighborhood UUID scan 判 partial/full)
+    ├── ItemVaultBlockEntityMixin.java    # ★ 0.5.1 核心:UUID 字段 + extraData 三件套 + NBT 持久化 + notifyMultiUpdated(合并检测+lazy mint)
     └── PackageRepackageHelperInvoker.java # @Invoker repackBasedOnRecipes(protected → 调用桥,0.5.0)
 
 src/main/resources/
@@ -69,19 +71,19 @@ src/main/templates/META-INF/
 └── neoforge.mods.toml              # NeoForge mod 元数据(含 [[mixins]] 表 + 依赖声明,由 generateModMetadata 做 ${...} 替换)
 ```
 
-> **NeoForge 迁移要点**:mixin 文件 + VaultIdentity + VaultBoxTracker **跨 Forge/NeoForge 零改动**(只 import `net.minecraft.*` / `com.simibubi.create.*` / `org.spongepowered.asm.mixin.*`,无任何 loader 特定包)。迁移改动集中在:主类入口(Forge→NeoForge event bus)、`SharedPackagePool` / `PartialOrderTracker` 的 NBT 序列化(SavedData API + Codec)、构建系统(build.gradle / mods.toml→neoforge.mods.toml / mixins.json JAVA 级别)。详见 `_research/MIGRATION_FEASIBILITY.md`。
+> **NeoForge 迁移要点(0.5.1)**:`ItemVaultBlockEntityMixin` / `ConnectivityHandlerMixin` / `VaultIdentity` / `VaultExtraData` / `VaultGeometry` / `ItemVaultBlockEntityVaultIdAccessor` 在 Forge 0.5.1 与 NeoForge 0.5.1 间**只有一处实质差异**——1.21.1 的 `ItemVaultBlockEntity.write/read` 多一个 `HolderLookup.Provider` 参数,所以 `@Inject` 的 method descriptor 和 handler 签名是三参形式(`write(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;Z)V`),Forge 1.20.1 是两参。其它 Create API(`IMultiBlockEntityContainer` extraData 三件套、`ConnectivityHandler.splitMultiAndInvalidate` 字节码顺序、`splitMulti(T)` 签名、`BlockFace.getConnectedPos`)均已字节码确认在 1.21.1 一致。`SharedPackagePool` / `PartialOrderTracker` 继续沿用 0.5.0-neoforge 的 SavedData + Codec 编解码 helper(HolderLookup.Provider + NbtOps),只是 key 类型从 BoundingBox 改成 UUID。
 
 ### 2.1 注入点
 
-0.5.0 用五个注入点实现共享包裹池 + 部分重组架构：
+0.5.1 用六个注入点实现共享包裹池 + 部分重组 + UUID 稳定身份架构：
 
 | 注入 | 方法 | 用途 |
 |---|---|---|
 | `@Inject(@At("HEAD"), cancellable)` | `RepackagerBlockEntity.attemptToRepackage` | **0.5.0 部分重组**：零副作用预扫描，命中部分/末班趟则 cancel vanilla（见 §2.4） |
 | `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | 整批入池：winner repack 后（完整订单走 vanilla 时）不再塞进自己队列，而是 deposit 进共享池 |
 | `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`（注父类，因为 Repackager 不重写 tick） | 策略 A：空闲理包机每 tick 从池里 poll 1 个包灌进自己私有队列（须 `redstonePowered`） |
-| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`（public，覆盖 break/wrench） | vault 销毁时 drop 池 + drop 余料：把该 vault 的共享池与 PartialOrderTracker 余料清空并爆出实体 |
-| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`（public） | vault reshape 时迁移池 key + tracker key：把旧 BoundingBox 的池与 tracker 迁到新 BoundingBox |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`（public，覆盖 break/wrench） | **0.5.1**：用 neighborhood UUID scan 判定 partial vs full teardown，**只有全拆**才把该 vault 的共享池与 PartialOrderTracker 余料清空并爆出实体 |
+| `@Inject(@At("HEAD"))` + `@Inject write/read RETURN` + extraData 三件套 | `ItemVaultBlockEntity.notifyMultiUpdated` + `write/read` + `getExtraData/setExtraData/modifyExtraData` | **★ 0.5.1 核心**：UUID 字段 NBT 持久化、经 extraData 跨 split/reform/reshape 传递、双 vault 合并检测、lazy mint |
 | `@Invoker` | `PackageRepackageHelper.repackBasedOnRecipes`（protected） | **0.5.0**：暴露 protected 方法供部分趟渐进合成（interface mixin，非合并方法） |
 
 > 为什么 tick 注入点在父类 `PackagerBlockEntity` 而非 `RepackagerBlockEntity`：
@@ -90,15 +92,15 @@ src/main/templates/META-INF/
 > **无法注入**。唯一可行模式是注父类 `PackagerBlockEntity` + handler 内 `instanceof Repackager`
 > 早退（避免误伤普通打包机）。
 
-### 2.2 核心算法：共享包裹池（0.4.0 架构）
+### 2.2 核心算法：共享包裹池（0.4.0 架构，0.5.1 key 改 UUID）
 
 0.3.0 的"快照分配 + 动态再平衡"两层机制已被 **共享包裹池** 架构彻底取代。核心数据结构是
-`SharedPackagePool`——一个世界级 `SavedData`，按保险库的 `BoundingBox` 为 key 存一个
-`Deque<BigItemStack>`。整个并行流程变成两步：
+`SharedPackagePool`——一个世界级 `SavedData`，按保险库的稳定 **UUID** 为 key（0.5.1；
+0.4.0–0.5.0 用 BoundingBox，见 §3.11 的坑）存一个 `Deque<BigItemStack>`。整个并行流程变成两步：
 
 ```
 winner repack 整批
-   └─→ 共享池 (SavedData, 按 vault BoundingBox 分桶)        ← 整批入池(@Redirect addAll)
+   └─→ 共享池 (SavedData, 按 vault UUID 分桶)              ← 整批入池(@Redirect addAll)
          ↑
          └─→ 每 tick,空闲理包机 poll 1 个 → 私有队列          ← 按需取(@Inject tick HEAD)
                └─→ heldBox → 发送动画 → 下游 extractItem 清空  ← vanilla tick/extractItem,不动
@@ -109,8 +111,9 @@ winner repack 整批
 `attemptToRepackage` 末尾原版的 `queuedExitingPackages.addAll(boxesToExport)` 被 redirect 到
 `SharedPackagePool.deposit(vaultKey, batch)`。winner 整批**不进任何私有队列**，全存入共享池。
 winner 自己也只是个普通消费者——下个 tick 和兄弟平等地 poll。vault key 用
-`VaultIdentity.vaultBoundingBoxOf(self)`：从 `targetInventory.getIdentifiedInventory().identifier()` 取
-`InventoryIdentifier.Bounds.bounds()`（见 §3.7 的稳定标识原理）。
+`VaultIdentity.vaultIdOf(self)`（0.5.1）：从 `targetInventory.getTarget().getConnectedPos()`
+反查到 vault controller BE，cast 成 `ItemVaultBlockEntityVaultIdAccessor` 读 mixin 字段
+`gdr$vaultId`（见 §3.11 的 UUID 原理；§3.7 是 0.2.1 时代的 BoundingBox 稳定标识历史）。
 
 **② 按需取（@Inject tick HEAD，策略 A）**
 
@@ -189,10 +192,10 @@ if (pkg != null) queuedExitingPackages.add(pkg);  // 灌进私有队列尾部
   （`if (!redstonePowered) return`），无需额外守卫
 
 **`PartialOrderTracker`（新增世界级 SavedData）**：与 `SharedPackagePool` 同生命周期模式——
-per-vault 按 `BoundingBox` 分桶，每个桶按 `orderId` 存一个 `TrackedOrder`（余料
-`InventorySummary` + 已消费槽位集合 + 网格边界 + 订单上下文/地址）。vault 销毁时
-`drainAndDrop` 把余料爆成原材料实体（与池包裹分别 drop，in-vault 碎片由 vanilla break 单独
-drop，三者不相交）；reshape 时 `migrateKey` 迁移；末班 `forget` 注销。
+per-vault 按 **UUID** 分桶（0.5.1；早期按 BoundingBox，见 §3.11），每个桶按 `orderId` 存一个 `TrackedOrder`（余料
+`InventorySummary` + 已消费槽位集合 + 网格边界 + 订单上下文/地址）。vault 全拆时
+`drainAndDrop` 把余料爆成原材料实体（与池包裹同时机 drop，in-vault 碎片由 vanilla break 单独
+drop，三者不相交）；双 vault 合并时 `migrateKey` 迁移；末班 `forget` 注销。
 
 > **NeoForge 序列化迁移**：1.21.1 起 `PackageOrderWithCrafts` / `InventorySummary` / `BigItemStack`
 > 都删除了 `read(CompoundTag)` / `write()`，改成 codec-only。`PartialOrderTracker` 的存档读写
@@ -362,8 +365,8 @@ Create 的 `CapManipulationBehaviourBase` 自己也有失效重建路径（`onHa
 不触碰 count 切分、`BigItemStack` 分发、`SPLIT MISMATCH` 守卫——物品增减风险为零。
 
 > **历史诊断（0.2.x 时代适用）**：0.3.0 用 `[GDR-DIST] ... across N repackager(s)` 的 N 排查 sibling
-> 漏找。**0.4.0 共享池架构不再有 sibling 发现**（每机独立从池 poll），此诊断已不适用。若 0.4.0 下仍
-> 有"部分理包机不工作"，查 `vaultBoundingBoxOf` 是否对这些机返回 null（targetInventory 未就绪）。
+> 漏找。**0.4.0 共享池架构不再有 sibling 发现**（每机独立从池 poll），此诊断已不适用。若 0.5.x 下仍
+> 有"部分理包机不工作"，查 `vaultIdOf` 是否对这些机返回 null（targetInventory 未就绪、或邻居不是 vault）。
 
 ### 3.8 【关键背景】发送状态机依赖 heldBox 被动清空协议
 
@@ -485,7 +488,11 @@ handler 用 `(BlockEntity, CallbackInfo)` 即可）。它不覆盖 add-block res
 > - **teardown 后的 part**:`removeController()` 把 `controller = null`,于是 `controller == null` → **true**(footgun 仍在,根因没变)
 > - 新增陷阱:某 part 的 `worldPosition` 恰好等于 controller 字段记录的坐标(罕见)也判 true。
 >
-> 结论不变:**`getControllerBE()` 仍是唯一可靠判定**。`ConnectivityHandlerMixin` 已经用 `getControllerBE()`,1.21.1 下无需改动。
+> 结论不变:**`getControllerBE()` 仍是唯一可靠判定**（在 teardown 之前、controller 字段还活着时）。
+> **0.5.1 更新**：teardown 期间 controller 字段会被 `removeController` null 掉，连 `getControllerBE()`
+> 都不可信（返回 part 自己，width/height 被 `removeController` 重置成 1）。0.5.1 的
+> `ConnectivityHandlerMixin` 已不再用 `getControllerBE()`，改读被拆 BE 的 mixin UUID 字段 +
+> neighborhood UUID scan 判定 partial/full teardown（见 §3.11）。
 
 **④ vault-centric 归属：打掉理包机不爆，打掉/扩建 vault 才爆**
 
@@ -493,14 +500,16 @@ handler 用 `(BlockEntity, CallbackInfo)` 即可）。它不覆盖 add-block res
 
 - **打掉理包机** → vanilla `destroy()` 只 drop `heldBox` + 私有 `queuedExitingPackages`（此时基本是空的，
   因为策略 A 下私有队列只 0~1 元素）。**共享池不爆**，包安全留 SavedData，重放理包机即恢复。
-- **打掉 vault（任意方块）/ 扳手拆除** → `ConnectivityHandlerMixin`（注 public `splitMulti`）触发
-  `drainAndDrop`，该 vault 的池全爆成实体。
-- **扩建 vault（reshape，加/减方块但不全拆）** → `ItemVaultBlockEntityMixin`（注 `notifyMultiUpdated`）
-  把池 key 从旧 BoundingBox **迁移**到新 BoundingBox，包不爆不丢，理包机继续从新 key 取（见 §3.9⑥）。
+- **打掉 vault（最后一个 part）/ 扳手拆除** → `ConnectivityHandlerMixin`（注 public `splitMulti`）
+  用 neighborhood UUID scan 判定为**全拆**，触发 `drainAndDrop`，该 vault 的池全爆成实体（0.5.1）。
+- **部分拆 vault（拆剩的方块重新组合）** → neighborhood scan 找到 sibling（同 UUID 的存活 vault BE），
+  判定为 partial break，**不 drain**。剩余 vault 通过 extraData 继承原 UUID，理包机继续从同一个池取（0.5.1）。
+- **扩建 vault（reshape，加/减方块但不全拆）** → 池的 key 是 UUID（不再 BoundingBox），reshape 期间 key
+  **完全不变**，理包机继续从同一个池取。包不爆不丢（见 §3.11）。
 
-**重建 BoundingBox 必须用 `initCapability()` 的精确公式**，不能用 `getInvId()`（`invId` 字段在能力首次
-查询前是 null）：vault 轴是 X 或 Z（不会是 Y），`box = fromCorners(pos, axis==Z ? pos.offset(r,r,l) : pos.offset(l,r,r))`，
-其中 pos = controller 的 worldPosition，r = getWidth()，l = getHeight()。已在 `ConnectivityHandlerMixin` 里实现。
+> **0.5.0 历史**：0.5.0 用 BoundingBox 作 key，reshape 时通过 `notifyMultiUpdated` HEAD 迁移 key
+> （§3.9⑥）。但不同 BE 在 reshape 期间看到的几何快照不一致，偶发物品复制/丢失。0.5.1 改用 UUID 彻底
+> 消除 race（§3.11）。0.5.0 重建 BoundingBox 用 `initCapability()` 精确公式的逻辑已全部删除。
 
 **⑤ mixin 类里不能有 public/static 普通方法（运行时崩溃）**
 
@@ -511,30 +520,24 @@ handler 用 `(BlockEntity, CallbackInfo)` 即可）。它不覆盖 add-block res
 `RepackagerBlockEntityMixin` 的 `public static` 方法，想让另一个 mixin（`PackagerBlockEntityMixin`）调用它。
 但 Mixin transformer 拒绝把非 private 的 static 方法合并进目标类（会污染 `RepackagerBlockEntity` 的 API 表面）。
 
-**修复**：共享 helper 必须放**独立工具类**（非 mixin），不能放 mixin 类里。`vaultBoundingBoxOf` 已搬到
-`com.github.goddamnrepackager.VaultIdentity`（普通 Java 类），两个 mixin 都调用 `VaultIdentity.vaultBoundingBoxOf(r)`。
-mixin 类里的 helper 方法必须是 `private`（实例方法），跨 mixin 共享的逻辑一律抽到独立类。
+**修复**：共享 helper 必须放**独立工具类**（非 mixin），不能放 mixin 类里。`vaultIdOf` 已搬到
+`com.github.goddamnrepackager.VaultIdentity`（普通 Java 类），各 mixin 都调用 `VaultIdentity.vaultIdOf(r)`。
+mixin 类里的 helper 方法必须是 `private`（实例方法）或满足 duck interface 契约的 public 实例方法
+（见 §3.11），跨 mixin 共享的逻辑一律抽到独立类。
 
-**⑥ reshape 迁移：`notifyMultiUpdated()` 是 reshape 的唯一 public 钩子**
+**⑥ reshape 迁移（0.5.0 实现、0.5.1 已废弃——改用 UUID，见 §3.11）**
 
-`splitMulti` 不覆盖 reshape（reshape 走私有 `splitMultiAndInvalidate`，不经 `splitMulti`），所以扩建 vault
-（3×3×3 → 3×3×4）时旧 BoundingBox key 会变孤儿——池里的包匹配不上新形状，理包机取不到（表现为"订单
-卡住，拆回原形状又恢复"）。
+> **0.5.1 更新**：本节描述的 BoundingBox + `notifyMultiUpdated` + `VaultBoxTracker.migrateKey` 方案在 0.5.0
+> 上线后暴露出严重 bug——不同理包机在 reshape 期间看到的 `InventoryIdentifier.Bounds` 不一致（vanilla
+> 的 `initCapability` 按 BE 各自懒算），导致同一个 vault 的池被 BoundingBox key 分裂成多份，引发物品
+> 复制和丢失。0.5.1 改用 vault BE 上的 stable UUID 作 key（经 Create extraData 钩子跨 split/reform 传递，
+> reshape 期间 key 完全不变）。本节保留作历史背景，但 `VaultBoxTracker` 已删除、`notifyMultiUpdated`
+> 的迁移逻辑已被 UUID minting + 双 vault 合并检测取代。详见 §3.11。
 
-**解法**：注 public `ItemVaultBlockEntity.notifyMultiUpdated()`（`()V`，无参，易注入）。字节码确认它在
-reshape 路径（`tryToFormNewMulti`）里 `setWidth(newWidth)/setHeight(newLength)` **之后**调用（offset 202），
-所以 HEAD 时 `getWidth()/getHeight()/getMainConnectionAxis()/getBlockPos()` 反映**新**几何。它也在 fresh
-formation 时触发，所以用"last-known box 变化"判定 reshape：
-
-- `VaultBoxTracker`（独立工具类，`WeakHashMap<ItemVaultBlockEntity, BoundingBox>`）记录每个 controller 的
-  last-known box。WeakHashMap 在 BE 被 GC 时自动清理。
-- `notifyMultiUpdated` HEAD：算 newBox = `boxOf(self)`；若 `lastBox(self)` 存在且 ≠ newBox，调
-  `SharedPackagePool.migrateKey(oldBox, newBox)`（把 deque 原样搬到新 key，FIFO/count 不变，不 drop）；
-  然后 `remember(self, newBox)` 更新基线。首次（无 oldBox）只 remember，不 migrate。
-- teardown（`splitMulti` HEAD）时 `forget(vault)` 清掉追踪条目，避免陈旧基线。
-
-**关键**：`notifyMultiUpdated` 在 fresh formation 时会对每个 part 也调用，但只有 controller 持有真实多方块
-几何（`radius>1 || length>1`），part 的 box 是单方块位置——所以用 `isController()` + 几何大小守卫过滤。
+历史方案（不再生效）：`splitMulti` 不覆盖 reshape（reshape 走私有 `splitMultiAndInvalidate`，不经 `splitMulti`），
+所以扩建 vault（3×3×3 → 3×3×4）时旧 BoundingBox key 会变孤儿——池里的包匹配不上新形状，理包机取不到
+（表现为"订单卡住，拆回原形状又恢复"）。0.5.0 的修补是注 `notifyMultiUpdated` 在 reshape 时迁移 key，
+但这个修补本身有 race，最终被 UUID 方案取代。
 
 **⑦ tick HEAD 灌队列必须守 redstone，否则理包机无需红石也能工作**
 
@@ -588,6 +591,102 @@ vanilla 的 close-out 行为。判断末班用 `TrackedOrder.wouldComplete`（�
 重复/空洞，`isOrderComplete` 语义崩坏，且每 tick 的 extract/insert 搅动巨大。余料存
 `PartialOrderTracker`(SavedData)，vault 销毁时爆成原材料实体，reshape 时迁移 key——
 与 SharedPackagePool 同生命周期模式。
+
+### 3.11 【0.5.1 核心改动】vault 身份从 BoundingBox 改为 UUID（经 Create extraData 钩子传递）
+
+**为什么改**：0.5.0 用 `BoundingBox` 作 `SharedPackagePool`/`PartialOrderTracker` 的 key，几何派生。但
+vanilla 的 `InventoryIdentifier.Bounds` 由 `ItemVaultBlockEntity.initCapability()` **按 BE 各自懒算**——
+reshape 期间不同理包机连接的 vault BE 的 `invId` 字段可能反映**不同时刻**的几何（因为 `initCapability`
+只在 `itemCapability.invalidate()` 后下次查询时才重算）。结果：同一个 vault 的池被分裂成多份 BoundingBox
+key，理包机分别取到不同的"快照"，引发**物品复制**（多个 key 各持一份相同数据）和**丢失**（drain 时
+只命中一个 key）。
+
+**业界参考**：研究 AE2、Sophisticated Storage、Mekanism、Storage Drawers 等可调整 multiblock 后发现，
+**它们普遍不做稳定的跨 reshape UUID**—— reshape 时重建并重新连接状态。我们的处境比它们难（池在 BE 外
+的 SavedData 里），不能照搬。但 Create **暴露了一个官方钩子**专门解决这个问题：
+`IMultiBlockEntityContainer` 的 extraData 三件套（`getExtraData`/`setExtraData`/`modifyExtraData`）——
+这是 Create 为"从旧 controller 把数据带到 parts，再合并进新 controller"设计的通道，今天 vault 留空没用，
+正好由我们填上。
+
+**新方案**：池 key 改为 vault BE 上的 stable `java.util.UUID`。
+
+#### UUID 怎么跨 split/reform/reshape 传递
+
+字节码确认 Create 调 extraData 三件套的精确时机：
+
+- **`ConnectivityHandler.splitMultiAndInvalidate`**（offset 339-369）：对每个 part，先
+  `partControllerBE.getExtraData()` 读，再 `part.setExtraData(extraData)` 写——**都在
+  `part.removeController(true)` 之前**。所以每个 part 在被 null controller 之前继承了原 controller 的
+  UUID（写入 part 自己的 `gdr$vaultId` 字段）。
+- **`ConnectivityHandler.tryToFormNewMultiOfWidth`**（offset 665-1074）：reform 后调
+  `self.notifyMultiUpdated()` 在新 controller 上。
+
+我们的 `ItemVaultBlockEntityMixin` 重写这三个 default 方法：
+- `getExtraData()` → 返回 `new VaultExtraData(gdr$vaultId)`（一个 plain record 载体）
+- `setExtraData(data)` → 把进来的 UUID 写入自己的 `gdr$vaultId`（如果还没设）+ 加到 `observedIds`（合并
+  检测用）+ 调 `SharedPackagePool.noteMergeParticipant(incoming)`（全局登记，让新 controller 后续
+  `notifyMultiUpdated` 能看到 sibling parts 收到的 UUID）
+- `modifyExtraData(data)` → 返回 data 不变（vanilla 在 self 上调，对我们无合并语义）
+
+`notifyMultiUpdated` HEAD 注入负责：① lazy mint UUID（首次形成时）；② 双 vault 合并检测（见下）。
+
+> **1.21.1 适配**：1.21.1 的 `ItemVaultBlockEntity.write/read` 多一个 `HolderLookup.Provider` 参数。
+> 所以两个 `@Inject` 的 descriptor 必须是三参形式
+> `write(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;Z)V`，
+> handler 签名也加 `HolderLookup.Provider`。Forge 1.20.1 的 2 参版本在本分支不适用。
+
+#### 双 vault 合并（罕见但要正确处理）
+
+两个独立 vault A 和 B 合并成一个更大的 vault 时：vanilla 的 `splitMultiAndInvalidate` 对每个 part 调
+`setExtraData`，但 parts 来自两个不同 vault——A 的 parts 继承 uuidA，B 的 parts 继承 uuidB。新 controller
+（formMulti 选出来的 max-count part）只看到自己的 UUID，看不到对方的。
+
+我们用**全局 merge-participant set** 解决：每次 `setExtraData` 收到一个 UUID，调
+`SharedPackagePool.noteMergeParticipant(uuid)` 把它登记到一个 transient set。新 controller 的
+`notifyMultiUpdated` 调 `pool.resolveMergeWinner(tracker)`：如果 set 里有 ≥ 2 个 UUID，选最小 UUID 作赢家
+（确定性），把所有输家 UUID 的池/tracker 条目 `migrateKey` 到赢家，然后清空 set。单 vault reshape 只
+登记一个 UUID，set size < 2，no-op。
+
+#### 部分拆 vs 全拆的判定（0.5.1 第三次修复）
+
+`ConnectivityHandlerMixin.splitMulti` HEAD 不能无条件 drain——拆 vault 一个 part 时，剩余 parts 会重新
+form 一个更小的 multiblock，**通过 extraData 继承同一个 UUID**，in-vault fragments 留在剩余 parts 里，
+理包机继续 craft。如果在 partial break 时 drain，池被清空但订单还在跑，下次 fragment 扫描会重新接管
+订单、重新 craft 64 包——**物品复制**（这是 0.5.1 第一版上线后立刻暴露的 regression）。
+
+判定方法（最终方案）：**neighborhood UUID scan**。从被 break 的 part 的 pos 扫 ±11 半径范围（vault 最大
+尺寸的安全余量），找还有没有 vault BE 持有同一 UUID 且未 removed。**找到 sibling → partial break，不
+drain；找不到 → 全拆，drain。**
+
+为什么不信任 `getControllerBE()`：teardown 过程中 controller 字段会被 null（§3.9③ footgun），
+`getControllerBE()` 返回 part 自己，而 part 的 `getWidth()/getHeight()` 字段被 `removeController` 重置成
+1——基于这些字段的 box scan 会算成 1×1×1，完全错过真实几何。直接按 UUID 扫邻居不依赖任何几何字段，
+最可靠。
+
+`anySiblingVaultWithUuidExists` 每次拆 vault block 都跑 23³ ≈ 12k 次 `level.getBlockEntity(p)`——O(N) 但
+break 是低频事件，可接受。
+
+#### 旧存档兼容
+
+`SharedPackagePool.load` / `PartialOrderTracker.load` 检测旧格式（vaultEntry 含 `"MinX"` 整型字段）→
+打 WARN + 返回空池。alpha 阶段强制 break：升级后池清空，玩家应让在跑订单完成后再升级。新格式用
+`vaultEntry.getUUID("VaultId")`。
+
+#### mixin 包路径陷阱（运行时崩 `IllegalClassLoadError`）
+
+`ItemVaultBlockEntityVaultIdAccessor` 接口最初放在 `com.github.goddamnrepackager.mixin` 包里。Mixin 子系统
+**禁止任何代码直接引用注册在 mixin 包里的类**——启动崩溃：
+`IllegalClassLoadError: ... is in a defined mixin package ... cannot be referenced directly`。
+修复：把 accessor interface 移到根包 `com.github.goddamnrepackager`（不在 mixin 包），mixin 类
+`implements` 它做 duck typing。
+
+#### mixin 类里 public 实例方法的边界
+
+§3.9⑤ 禁止 mixin 类里有 **public static** 方法（合并进目标类会污染 API 表面）。但 **public 实例方法**
+是允许的——尤其是用来满足 duck interface 契约（mixin 类 `implements SomeInterface` + 在 mixin 类里定义
+interface 的 public 方法，合并后目标类自动 implements 该 interface）。`ItemVaultBlockEntityMixin` 里的
+`goddamnrepackager$getVaultId()`/`setVaultId()` 和 `getExtraData()`/`setExtraData()`/`modifyExtraData()`
+都是这种模式。
 
 ---
 
@@ -724,8 +823,8 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 第四次的洞察是：**不碰闸门，而是接管订单的整个生命周期**——闸门只服务 vanilla 路径，
 被接管的订单由 tracker 的累计网格判定末班，合成与收尾全部回调 vanilla 自己的方法。
 
-**当前状态**：模组为 0.5.0-neoforge（共享池 + 部分重组）。jar 名(neoforge 分支)为
-`goddamnrepackager-0.5.0-neoforge-alpha.jar`。
+**当前状态**：模组为 0.5.1-neoforge（共享池 + 部分重组 + UUID 稳定身份）。jar 名(neoforge 分支)为
+`goddamnrepackager-0.5.1-neoforge-alpha.jar`。
 
 ---
 
@@ -743,7 +842,7 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
    ./g.sh runClient        # 启动开发环境游戏（含 Create + JEI）
    ```
 4. 发布 jar 在 `build/libs/` 下。**alpha 阶段的 jar 带有 `-alpha` 后缀**，例如
-   `goddamnrepackager-0.5.0-neoforge-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
+   `goddamnrepackager-0.5.1-neoforge-alpha.jar`（由 `gradle.properties` 里的 `mod_is_alpha=true` 控制，
    通过给 `jar` 任务设 `archiveClassifier = 'alpha'` 实现）。脱离 alpha 后把 `mod_is_alpha` 改为
    `false`，jar 名即变为 `goddamnrepackager-<version>.jar`。
 
@@ -776,11 +875,12 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 在 `GodDamnRepackager.java` 里把 `DEBUG_LOGGING = true` 重新编译。开启后：
 - 每次入池打印 `[GDR-POOL] deposited N package(s)` 行：理包机整理后整批入池的总量。
 - 每次空闲理包机取包打印 `[GDR-POOL] fed 1 package` 行：哪个理包机取了包、池里还剩多少。
-- 每次 vault 销毁/reshape 爆池打印 `[GDR-POOL] drained & dropped N package(s)` 行。
+- 每次 vault **全拆**（最后一个 part 也拆掉）爆池打印 `[GDR-POOL] drained & dropped N package(s)` 行（0.5.1：部分拆不 drain）。
 - **（0.5.0）** 每次部分趟合成打印 `[GDR-PARTIAL] crafted N package(s) for order ...` 行：渐进合成了几包、消费了几片碎片。
 - **（0.5.0）** 末班收尾打印 `[GDR-PARTIAL] final pass for order ... N package(s) exported, tracker cleared` 行：订单收尾、tracker 注销。
-- **（0.5.0）** vault 销毁爆余料打印 `[GDR-PARTIAL] drained N item(s) from M tracked order(s)` 行。
-- **（0.5.0）** vault reshape 迁移 tracker 打印 `[GDR-PARTIAL] migrated N tracked order(s)` 行。
+- **（0.5.0）** vault 全拆爆余料打印 `[GDR-PARTIAL] drained N item(s) from M tracked order(s)` 行（0.5.1：与 pool drain 同一时机）。
+- **（0.5.1）** 双 vault 合并打印 `[GDR-POOL] two-vault merge resolved: winner=... migrated N package(s) to winner` 行（罕见，只在两个独立 vault 合并时）。
+- **（0.5.1 升级）** 旧存档升级到 0.5.1 时一次性打印 `[GDR-POOL] detected legacy BoundingBox-keyed SavedData ...` + `[GDR-PARTIAL] detected legacy ...` 警告（确认池清空）。
 - （0.3.0 的 `[GDR-DIST]` / `[GDR-REBAL]` / `SPLIT MISMATCH` / `REBALANCE MISMATCH` 已随快照+再平衡
   逻辑删除，0.4.0 不再出现。）
 
@@ -794,10 +894,13 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 | 游戏启动崩溃 `non-private static method`（checkMethodVisibility） | 0.4.0：mixin 类里有 public/static 普通方法。共享 helper 必须放独立工具类（见 §3.9⑤） |
 | 游戏启动崩溃（tick） | 0.4.0：tick 注入点写错（必须注父类 PackagerBlockEntity + instanceof 守卫，见 §3.9①） |
 | 理包机无需红石也工作 | 0.4.0：tick HEAD 灌队列漏了红石守卫。加 `if (!self.redstonePowered) return;`（见 §3.9⑦） |
-| 扩建 vault 后订单卡住（拆回又恢复） | 0.4.0：reshape 没迁移池 key，旧 BoundingBox 变孤儿。需注 `notifyMultiUpdated` 迁移（见 §3.9⑥） |
-| 只有部分理包机工作 | 0.4.0 下应是历史问题：① 若用 0.2.0 升级到 0.2.1+（见 §3.7）。② 0.4.0 共享池架构不依赖 sibling 发现，每机独立 poll，不应再有此问题；若仍有，查 `vaultBoundingBoxOf` 是否返回 null（targetInventory 未就绪） |
+| 扩建 vault 后订单卡住（拆回又恢复） | 0.4.0：reshape 没迁移池 key。0.5.0 加了 `notifyMultiUpdated` 迁移但有 race（不同 BE 看到不同 BoundingBox）。**0.5.1 已彻底修：池 key 改用 vault UUID，reshape 期间 key 不变**（见 §3.11） |
+| 只有部分理包机工作 | 0.4.0 下应是历史问题：① 若用 0.2.0 升级到 0.2.1+（见 §3.7）。② 0.4.0 共享池架构不依赖 sibling 发现，每机独立 poll，不应再有此问题；若仍有，查 `vaultIdOf` 是否返回 null（targetInventory 未就绪、或邻居不是 vault） |
 | 产物数量不对 | 0.4.0：开 `DEBUG_LOGGING` 看 `[GDR-POOL] deposited` 总量是否 == 订单数，`fed` 累计是否 == deposited。共享池是纯搬运+count 拆分，不等说明 poll/deposit 逻辑错（见 §2.3） |
 | 下游堵塞时积压不消散 | 确认 0.4.0+。堵塞机被 `!heldBox.isEmpty()` 守卫挡住不取新包，活自动流向空闲兄弟（共享池天然均衡）。开 DEBUG 看 `[GDR-POOL] fed` 是否只出现在非堵塞机 |
-| 打掉理包机后包裹"消失" | 这不是 bug——共享池跟着存档走，包裹在池里，重放理包机即恢复（见 §3.9④）。只有打掉/扳手拆除 vault 才爆池；扩建 vault 会迁移 key（不爆） |
-| 打掉/扩建 vault 后包裹没爆出来 | `ConnectivityHandlerMixin` 没注入成功（看启动日志有无 splitMulti 相关报错），或 `getControllerBE()` 返回 null（HEAD 时 controller 已被 null，见 §3.9③） |
+| 打掉理包机后包裹"消失" | 这不是 bug——共享池跟着存档走，包裹在池里，重放理包机即恢复（见 §3.9④）。只有完全拆掉 vault 才爆池；扩建 vault / 部分拆 vault 都不爆（0.5.1） |
+| 打掉/扩建 vault 后包裹没爆出来 | 0.5.1：`ConnectivityHandlerMixin` 改用 neighborhood UUID scan 判定全拆 vs 部分拆。部分拆不 drain（剩余 vault 通过 extraData 继承 UUID，订单继续跑）；只有拆到最后一个 part 时才 drain（见 §3.11）。如果完全没爆出来，看启动日志有无 mixin 报错。0.5.0 老问题（`getControllerBE()` footgun 导致算错几何）已修 |
 | 游戏启动崩溃（打开仓库管理员时） | `@Inject` 参数类型和目标方法不匹配（见 §3.3） |
+| 0.5.1：升级后池被清空 | 0.5.0 的 BoundingBox-keyed SavedData 不兼容，load 时检测到旧格式会 WARN + 清空。alpha break——让订单跑完再升级（见 §3.11 旧存档兼容） |
+| 0.5.1：游戏启动崩 `IllegalClassLoadError: ... is in a defined mixin package` | 引用了注册在 `mixin` 包里的类。共享类必须放根包或独立非-mixin 包（见 §3.11 mixin 包路径陷阱） |
+| 0.5.1：部分拆 vault 后理包机仍在合成、且爆出物品 | 0.5.1 早期版本：splitMulti HEAD 无条件 drain 或基于 `getControllerBE()` footgun 算错几何。已改用 neighborhood UUID scan 判定 partial vs full teardown（见 §3.11）。验证：拆一个 part 不应有 `drained & dropped` 日志 |

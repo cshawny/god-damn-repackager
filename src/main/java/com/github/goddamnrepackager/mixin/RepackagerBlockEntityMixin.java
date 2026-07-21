@@ -8,7 +8,6 @@ import com.simibubi.create.content.logistics.BigItemStack;
 import com.simibubi.create.content.logistics.packager.repackager.RepackagerBlockEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.neoforged.neoforge.items.IItemHandler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -19,6 +18,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Path ② (0.4.0): shared package pool. The repackager that wins the fragment
@@ -91,7 +91,7 @@ public class RepackagerBlockEntityMixin {
             List<BigItemStack> queue, Collection<BigItemStack> boxesToAdd) {
         RepackagerBlockEntity self = (RepackagerBlockEntity) (Object) this;
         Level level = self.getLevel();
-        BoundingBox vaultKey = VaultIdentity.vaultBoundingBoxOf(self);
+        UUID vaultKey = VaultIdentity.vaultIdOf(self);
         if (vaultKey == null || level == null) {
             return queue.addAll(boxesToAdd); // no resolvable vault: vanilla fallback
         }

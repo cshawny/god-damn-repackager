@@ -15,7 +15,6 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.phys.Vec3;
 
@@ -24,29 +23,35 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Tracks orders that have been TAKEN OVER by partial repackaging (see
- * PartialRepackager), stored as world-level SavedData alongside SharedPackagePool.
+ * {@link PartialRepackager}), stored as world-level SavedData alongside
+ * {@link SharedPackagePool}.
  *
- * Why this exists: once we consume ANY fragment of an order, vanilla's
- * isOrderComplete can never pass again (the 2D fragment grid has gaps at the
+ * <p><b>0.5.1 change:</b> keyed by vault {@link UUID} (not BoundingBox), in lockstep
+ * with {@link SharedPackagePool}. See TECHNICAL.md §3.11 for why.</p>
+ *
+ * <p>Why this exists: once we consume ANY fragment of an order, vanilla's
+ * {@code isOrderComplete} can never pass again (the 2D fragment grid has gaps at the
  * consumed slots), so we become responsible for the order's remaining lifetime.
- * For each taken-over order we must remember:
+ * For each taken-over order we must remember:</p>
+ * <ul>
+ *   <li>leftovers: items from consumed fragments that didn't complete a craft yet
+ *       (e.g. 5 of 8 planks for a chest). Raw materials for future partial passes —
+ *       NOT exported until the order closes out.</li>
+ *   <li>consumed fragment slots + grid bounds: the cumulative equivalent of
+ *       {@code isOrderComplete}, so we know when the LAST fragment has been consumed
+ *       and the order can be closed out via a vanilla {@code repack()}.</li>
+ *   <li>context (full {@link PackageOrderWithCrafts}) + address: needed to craft and
+ *       to build pseudo-fragments for the final pass.</li>
+ * </ul>
  *
- *  - leftovers: items from consumed fragments that didn't complete a craft yet
- *    (e.g. 5 of 8 planks for a chest). They are the raw materials for future
- *    partial passes — NOT exported until the order closes out.
- *  - consumed fragment slots + grid bounds: the cumulative equivalent of
- *    isOrderComplete, so we know when the LAST fragment has been consumed and
- *    the order can be closed out via a vanilla repack().
- *  - context (full PackageOrderWithCrafts) + address: needed to craft and to
- *    build pseudo-fragments for the final pass.
- *
- * Lifecycle mirrors SharedPackagePool (vault-centric): entries survive chunk
+ * <p>Lifecycle mirrors {@link SharedPackagePool} (vault-centric): entries survive chunk
  * unload / restart; vault teardown drains leftovers as raw item entities
- * (ConnectivityHandlerMixin); vault reshape migrates the key
- * (ItemVaultBlockEntityMixin); order close-out forgets the entry.
+ * ({@code ConnectivityHandlerMixin}); two-vault merge migrates the key (see
+ * {@link SharedPackagePool#resolveMergeWinner}); order close-out forgets the entry.</p>
  *
  * --- 1.21.1 / NeoForge migration notes ---
  * Mirrors SharedPackagePool's SavedData pattern: save/load carry a
@@ -59,8 +64,8 @@ public class PartialOrderTracker extends SavedData {
 
     private static final String DATA_ID = "gdr_partial_order_tracker";
 
-    /** vault box -> (orderId -> tracked state) */
-    private final Map<BoundingBox, Map<Integer, TrackedOrder>> orders = new HashMap<>();
+    /** vault UUID -> (orderId -> tracked state) */
+    private final Map<UUID, Map<Integer, TrackedOrder>> orders = new HashMap<>();
 
     public PartialOrderTracker() {}
 
@@ -127,7 +132,7 @@ public class PartialOrderTracker extends SavedData {
     }
 
     /**
-     * Load from NBT.
+     * Load from NBT. Detects the legacy BoundingBox-keyed format and clears on upgrade.
      *
      * @param registries needed to decode ItemStack components inside the
      *                   PackageOrderWithCrafts / InventorySummary codecs
@@ -135,11 +140,26 @@ public class PartialOrderTracker extends SavedData {
     public static PartialOrderTracker load(CompoundTag root, HolderLookup.Provider registries) {
         PartialOrderTracker tracker = new PartialOrderTracker();
         ListTag vaultList = root.getList("Vaults", Tag.TAG_COMPOUND);
+        if (vaultList.isEmpty()) return tracker;
+
+        // Legacy-format probe (0.5.0 BoundingBox-keyed).
+        CompoundTag sample = vaultList.getCompound(0);
+        if (sample.contains("MinX")) {
+            int lostOrders = 0;
+            for (int i = 0; i < vaultList.size(); i++) {
+                lostOrders += vaultList.getCompound(i).getList("Orders", Tag.TAG_COMPOUND).size();
+            }
+            GodDamnRepackager.LOGGER.warn(
+                    "[GDR-PARTIAL] detected legacy BoundingBox-keyed SavedData ({} tracked order(s)); "
+                            + "clearing on upgrade to 0.5.1 (alpha break — see changelog)",
+                    lostOrders);
+            return tracker;
+        }
+
         for (int i = 0; i < vaultList.size(); i++) {
             CompoundTag vaultEntry = vaultList.getCompound(i);
-            BoundingBox box = new BoundingBox(
-                    vaultEntry.getInt("MinX"), vaultEntry.getInt("MinY"), vaultEntry.getInt("MinZ"),
-                    vaultEntry.getInt("MaxX"), vaultEntry.getInt("MaxY"), vaultEntry.getInt("MaxZ"));
+            if (!vaultEntry.hasUUID("VaultId")) continue;
+            UUID id = vaultEntry.getUUID("VaultId");
             Map<Integer, TrackedOrder> orderMap = new HashMap<>();
             ListTag orderList = vaultEntry.getList("Orders", Tag.TAG_COMPOUND);
             for (int j = 0; j < orderList.size(); j++) {
@@ -159,7 +179,7 @@ public class PartialOrderTracker extends SavedData {
                     t.finalIndexPerLink.put(Integer.parseInt(key), fi.getInt(key));
                 orderMap.put(t.orderId, t);
             }
-            if (!orderMap.isEmpty()) tracker.orders.put(box, orderMap);
+            if (!orderMap.isEmpty()) tracker.orders.put(id, orderMap);
         }
         return tracker;
     }
@@ -167,16 +187,10 @@ public class PartialOrderTracker extends SavedData {
     @Override
     public CompoundTag save(CompoundTag root, HolderLookup.Provider registries) {
         ListTag vaultList = new ListTag();
-        for (Map.Entry<BoundingBox, Map<Integer, TrackedOrder>> e : orders.entrySet()) {
+        for (Map.Entry<UUID, Map<Integer, TrackedOrder>> e : orders.entrySet()) {
             if (e.getValue().isEmpty()) continue;
             CompoundTag vaultEntry = new CompoundTag();
-            BoundingBox b = e.getKey();
-            vaultEntry.putInt("MinX", b.minX());
-            vaultEntry.putInt("MinY", b.minY());
-            vaultEntry.putInt("MinZ", b.minZ());
-            vaultEntry.putInt("MaxX", b.maxX());
-            vaultEntry.putInt("MaxY", b.maxY());
-            vaultEntry.putInt("MaxZ", b.maxZ());
+            vaultEntry.putUUID("VaultId", e.getKey());
             ListTag orderList = new ListTag();
             for (TrackedOrder t : e.getValue().values()) {
                 CompoundTag o = new CompoundTag();
@@ -245,7 +259,7 @@ public class PartialOrderTracker extends SavedData {
     }
 
     /** Tracked state for (vault, orderId), or null if the order isn't taken over. */
-    public TrackedOrder get(BoundingBox vault, int orderId) {
+    public TrackedOrder get(UUID vault, int orderId) {
         Map<Integer, TrackedOrder> m = orders.get(vault);
         return m == null ? null : m.get(orderId);
     }
@@ -256,7 +270,7 @@ public class PartialOrderTracker extends SavedData {
      * latest fragments (they're constant per order, but the first pass may see
      * them before the tracker exists).
      */
-    public void update(BoundingBox vault, int orderId, InventorySummary leftovers,
+    public void update(UUID vault, int orderId, InventorySummary leftovers,
                        List<ItemStack> consumedFragments, PackageOrderWithCrafts context, String address) {
         TrackedOrder t = orders.computeIfAbsent(vault, k -> new HashMap<>())
                 .computeIfAbsent(orderId, k -> new TrackedOrder());
@@ -269,24 +283,39 @@ public class PartialOrderTracker extends SavedData {
     }
 
     /** Order closed out (final pass done) — drop its tracking entry. */
-    public void forget(BoundingBox vault, int orderId) {
+    public void forget(UUID vault, int orderId) {
         Map<Integer, TrackedOrder> m = orders.get(vault);
         if (m == null) return;
         if (m.remove(orderId) != null) setDirty();
         if (m.isEmpty()) orders.remove(vault);
     }
 
-    /** Vault reshape: move all tracked orders to the new geometry key. */
-    public void migrateKey(BoundingBox oldBox, BoundingBox newBox) {
-        if (oldBox.equals(newBox)) return;
-        Map<Integer, TrackedOrder> m = orders.remove(oldBox);
+    /**
+     * Two-vault merge: move all tracked orders from the loser UUID to the winner UUID.
+     * Called in lockstep with {@link SharedPackagePool#resolveMergeWinner}.
+     */
+    public void migrateKey(UUID oldId, UUID newId) {
+        if (oldId.equals(newId)) return;
+        Map<Integer, TrackedOrder> m = orders.remove(oldId);
         if (m == null || m.isEmpty()) return;
-        orders.put(newBox, m);
+        Map<Integer, TrackedOrder> existing = orders.get(newId);
+        if (existing == null) {
+            orders.put(newId, m);
+        } else {
+            existing.putAll(m);
+        }
         setDirty();
         if (GodDamnRepackager.DEBUG_LOGGING) {
             GodDamnRepackager.LOGGER.info(
-                    "[GDR-PARTIAL] migrated {} tracked order(s) on vault reshape {} -> {}", m.size(), oldBox, newBox);
+                    "[GDR-PARTIAL] migrated {} tracked order(s) on vault merge {} -> {}",
+                    m.size(), oldId, newId);
         }
+    }
+
+    /** No-op merge-participant registration; this tracker only mirrors pool migration. */
+    public void noteMergeParticipant(UUID id) {
+        // No transient state of its own — SharedPackagePool drives the merge and calls
+        // our migrateKey directly. Kept for symmetry with SharedPackagePool's API.
     }
 
     /**
@@ -295,7 +324,7 @@ public class PartialOrderTracker extends SavedData {
      * fragments of these orders drop separately via vanilla vault breakage —
      * disjoint sets, no double-counting. Idempotent.
      */
-    public void drainAndDrop(BoundingBox vault, Level level, BlockPos pos) {
+    public void drainAndDrop(UUID vault, Level level, BlockPos pos) {
         Map<Integer, TrackedOrder> m = orders.remove(vault);
         if (m == null || m.isEmpty()) return;
         Vec3 dropPos = Vec3.atCenterOf(pos);

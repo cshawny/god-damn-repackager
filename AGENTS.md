@@ -7,7 +7,7 @@
 
 ## 1. 项目一句话
 
-一个 NeoForge 1.21.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度；0.5.0 起还支持「部分重组」——碎片够合成 ≥1 次即开工，不必等全单碎片到齐。当前处于 **alpha (0.5.0-neoforge)**(共享包裹池 + 部分重组,1.20.1 Forge → 1.21.1 NeoForge 移植版)。
+一个 NeoForge 1.21.1 Mixin 模组，让 Create 6.0+ 的理包机(Repackager)并行处理同一保险库(Vault)的大批量合成订单。N 个理包机 ≈ N 倍合成速度；0.5.0 起还支持「部分重组」——碎片够合成 ≥1 次即开工，不必等全单碎片到齐；0.5.1 起把保险库身份从几何坐标改为稳定 UUID，扩建/部分拆保险库时池不丢不重。当前处于 **alpha (0.5.1-neoforge)**(共享包裹池 + 部分重组 + UUID 稳定身份,1.20.1 Forge → 1.21.1 NeoForge 移植版)。
 
 > **双分支维护**: `master` 是 Forge 1.20.1 稳定线,`neoforge-1.21.1` 是 NeoForge 1.21.1 移植线。两线 API 不同(Create 6.0.8 Forge vs 6.0.10 NeoForge),**无法 merge**,各自独立演进。本文件描述的是 `neoforge-1.21.1` 分支的状态。
 
@@ -31,7 +31,7 @@
 
 ### 产出的 jar
 
-- `build/libs/goddamnrepackager-0.4.0-neoforge-alpha.jar`。
+- `build/libs/goddamnrepackager-0.5.1-neoforge-alpha.jar`。
 - alpha 后缀由 `gradle.properties` 的 `mod_is_alpha=true` 控制(给 `jar` 任务设 `archiveClassifier = 'alpha'`)。脱离 alpha 后改 `false` 即可去掉后缀。
 
 ### 验证方式
@@ -41,11 +41,11 @@
 - 如果用户反馈问题，优先用 **DEBUG 日志** 定位(`GodDamnRepackager.DEBUG_LOGGING = true` 重编)。日志标记:
   - `[GDR-POOL] deposited`:理包机整理后整批入共享池
   - `[GDR-POOL] fed`:空闲理包机从池里取 1 个包
-  - `[GDR-POOL] drained & dropped`:vault 销毁/扩建时池爆出实体
-  - `[GDR-PARTIAL] crafted`:部分重组渐进合成了一包(0.5.0)
-  - `[GDR-PARTIAL] final pass`:订单末班收尾、tracker 注销(0.5.0)
-  - `[GDR-PARTIAL] drained`:vault 销毁爆出托管余料(0.5.0)
-  - `[GDR-PARTIAL] migrated`:vault reshape 迁移 tracker key(0.5.0)
+  - `[GDR-POOL] drained & dropped`:vault **全拆**时（拆到最后一个 part）池爆出实体；部分拆不 drain（0.5.1）
+  - `[GDR-PARTIAL] crafted`(0.5.0):部分趟渐进合成了一批
+  - `[GDR-PARTIAL] final pass`(0.5.0):被接管订单末班收尾完成
+  - `[GDR-PARTIAL] drained`(0.5.0):vault 全拆时爆余料（0.5.1：与 pool drain 同一时机）
+  - `[GDR-POOL] two-vault merge resolved`(0.5.1):两个独立 vault 合并时输家池迁到赢家 UUID（罕见）
 
 ---
 
@@ -56,20 +56,24 @@
 ```
 src/main/java/com/github/goddamnrepackager/
 ├── GodDamnRepackager.java          # @Mod 主类，只有日志+DEBUG_LOGGING 开关
-├── SharedPackagePool.java          # ★ 世界级 SavedData：per-vault 共享包裹池(deposit/poll/migrateKey/drainAndDrop)
+├── SharedPackagePool.java          # ★ 世界级 SavedData：per-vault 共享包裹池(key 是 UUID，0.5.1)
 ├── PartialRepackager.java          # ★ 0.5.0 部分重组逻辑(预扫描/部分趟/末班，纯静态方法)
 ├── PartialOrderTracker.java        # ★ 0.5.0 世界级 SavedData：per-vault 接管订单的余料+已消费网格状态
-├── VaultIdentity.java              # 工具类：vaultBoundingBoxOf(r) 返回 vault 的 BoundingBox(两个 mixin 共用)
-├── VaultBoxTracker.java            # 工具类：WeakHashMap 追踪 controller 的 last-known box(reshape 迁移用)
+├── VaultIdentity.java              # 工具类：vaultIdOf(r) 返回 vault 的 UUID(0.5.1，从 controller BE mixin 字段读)
+├── VaultExtraData.java             # record 载体(0.5.1)：UUID 穿过 Create extraData Object 通道
+├── VaultGeometry.java              # 工具类(0.5.1)：anySiblingVaultWithUuidExists 判定 partial vs full teardown
+├── ItemVaultBlockEntityVaultIdAccessor.java  # duck interface(0.5.1，**根包**非 mixin 包)：UUID 字段桥
 └── mixin/
     ├── RepackagerBlockEntityMixin.java   # @Inject attemptToRepackage HEAD(部分接管,cancellable) + @Redirect addAll → 入池
     ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机从池 poll(注父类，instanceof 守卫，须 redstonePowered)
-    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 销毁(break/wrench)时 drop 池 + drop 余料
-    ├── ItemVaultBlockEntityMixin.java    # @Inject notifyMultiUpdated(public) → vault reshape 时迁移池 key + tracker key
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 全拆时 drop 池+余料(0.5.1：neighborhood UUID scan 判 partial/full)
+    ├── ItemVaultBlockEntityMixin.java    # ★ 0.5.1 核心：UUID 字段 + extraData 三件套 + NBT 持久化 + notifyMultiUpdated(合并检测+lazy mint)
     └── PackageRepackageHelperInvoker.java # @Invoker repackBasedOnRecipes(protected → 调用桥，0.5.0)
 ```
 
-> **注意**：mixin 类里**不能有 public/static 普通方法**——mixin 方法会被合并进目标类，非 private 的 static 方法会被 Mixin transformer 拒绝（`checkMethodVisibility` 报 `non-private static method`）。共享 helper 必须放独立工具类（如 `VaultIdentity`），不能放 mixin 类里。**例外**：`@Accessor`/`@Invoker` 写在 interface mixin 里是调用桥(transformer 生成、非合并方法)，不受此限制(见 `PackageRepackageHelperInvoker`)。
+> **注意**：mixin 类里**不能有 public/static 普通方法**——mixin 方法会被合并进目标类，非 private 的 static 方法会被 Mixin transformer 拒绝（`checkMethodVisibility` 报 `non-private static method`）。共享 helper 必须放独立工具类（如 `VaultIdentity`/`VaultGeometry`），不能放 mixin 类里。**public 实例方法允许**（用来满足 duck interface 契约，见 §3.11）。@Invoker/@Accessor 接口 mixin 是标准例外（方法被转成调用桥，不合并）。
+>
+> **mixin 包路径禁区(0.5.1 踩过)**：Mixin 子系统禁止任何代码直接引用注册在 `mixin` 包里的类。共享的 duck interface（如 `ItemVaultBlockEntityVaultIdAccessor`）必须放**根包**或独立非-mixin 包，启动崩 `IllegalClassLoadError: ... is in a defined mixin package`（见 TECHNICAL.md §3.11）。
 
 ### 当前注入点(mixin 里，六个)
 
@@ -78,8 +82,8 @@ src/main/java/com/github/goddamnrepackager/
 | `@Inject(@At("HEAD"), cancellable)` | `RepackagerBlockEntity.attemptToRepackage` | **0.5.0 部分重组**:零副作用预扫描，命中部分/末班趟则 cancel vanilla(见 TECHNICAL.md §2.4) |
 | `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | **整批入池**:winner repack 后(完整订单走 vanilla 时)deposit 进共享池(不入私有队列) |
 | `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`(注**父类**!) | **策略 A 灌队列**:空闲理包机每 tick 从池 poll 1 个包进私有队列。handler 内 `instanceof Repackager` 早退 |
-| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 销毁 drop 池+余料**:drainAndDrop 该 vault 的池与 PartialOrderTracker 余料成实体 |
-| `@Inject(@At("HEAD"))` | `ItemVaultBlockEntity.notifyMultiUpdated`(public) | **vault reshape 迁移 key**:旧 BoundingBox → 新 BoundingBox(池 + tracker，包不爆不丢) |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 全拆时 drop 池+余料(0.5.1)**：用 neighborhood UUID scan 判定 partial vs full teardown。部分拆不 drain（剩余 vault 通过 extraData 继承 UUID，订单继续跑）；只有拆到最后一个 part 才 drain |
+| `@Inject(@At("HEAD"))` + `@Inject write/read RETURN` + extraData 三件套 | `ItemVaultBlockEntity.notifyMultiUpdated` + `write/read` + `getExtraData/setExtraData/modifyExtraData` | **★ 0.5.1 核心**：UUID 字段 NBT 持久化、经 extraData 跨 split/reform/reshape 传递、双 vault 合并检测、lazy mint。reshape 期间 key 完全不变 |
 | `@Invoker` | `PackageRepackageHelper.repackBasedOnRecipes`(protected) | **0.5.0**:暴露 protected 方法供部分趟渐进合成(interface mixin) |
 
 ### 绝对不要碰的东西(除非你读透了对应小节)
@@ -90,24 +94,27 @@ src/main/java/com/github/goddamnrepackager/
 | 父类 `PackagerBlockEntity.tick()` 里 offset 67-132 的取件逻辑(`get(0)`/`count--`/`remove`) | 这是发送状态机的心脏，且 Repackager **不重写 tick**。0.4.0 只在 tick HEAD 灌队列(策略 A)，**不拦 get(0)**(那是策略 B，高危)。注 tick 必须 `@Mixin(PackagerBlockEntity.class)` + `instanceof` 守卫 | TECHNICAL.md §3.8、§3.9①、§4.1 |
 | `BigItemStack.count` 的语义 | `count` 是"该包裹要发几次"，不是"包裹有几个"。pool.poll() 按 count 拆分(>1 只取 1 份)，drainAndDrop 按 count 全量 drop | TECHNICAL.md §3.5 |
 | Mixin 配置注册 | NeoForge 不再用 MixinGradle / `mixin {}` 块 / jar manifest 的 `MixinConfigs` 属性。改成 `neoforge.mods.toml` 里的 `[[mixins]] config="..."` 表(NeoForge 靠这个发现 mixin 配置)。Mixin 本体已内嵌进 NeoForge。**Forge 1.20.1 的 MixinGradle 方案在本分支完全作废** | TECHNICAL.md §3.1 |
-| `splitMulti` vs `splitMultiAndInvalidate` + `isController()` footgun | vault 销毁只能注 public `splitMulti`(break/wrench 覆盖)；reshape 另用 `notifyMultiUpdated` 迁移 key。private `splitMultiAndInvalidate` 因 SearchCache 是 package-private **无法注入**(Mixin 要求 handler 匹配完整参数列表)。teardown 后 `isController()` 谎报 true，必须用 `getControllerBE()` | TECHNICAL.md §3.9②③⑥ |
+| `splitMulti` vs `splitMultiAndInvalidate` + `isController()` footgun + partial/full 判定 | vault 销毁只能注 public `splitMulti`(break/wrench 覆盖)。private `splitMultiAndInvalidate` 因 SearchCache 是 package-private **无法注入**。teardown 后 `isController()`/`getControllerBE()` 不可信（§3.9③ footgun）。**0.5.1**: 池 key 改用 UUID（不再 BoundingBox），reshape 时 key 不变；partial vs full teardown 用 `VaultGeometry.anySiblingVaultWithUuidExists` 判定，**不能**依赖 `getControllerBE()`/几何字段 | TECHNICAL.md §3.9②③⑥、§3.11 |
 | tick HEAD 灌队列必须守 `redstonePowered` | vanilla tick() 本身无红石检查(靠 lazyTick GATE 1)，我们的 tick 注入直接灌队列会绕过红石门。加 `if (!self.redstonePowered) return;`(见 §3.9⑦) | TECHNICAL.md §3.9⑦ |
 | 部分重组的五条不变量(0.5.0) | 改 `PartialRepackager`/`PartialOrderTracker` 前必须逐条核对 §3.10：①绝不在 `addPackageFragment` 层触发 repack；②预扫描零副作用；③部分趟只调 `repackBasedOnRecipes`、末班才调 `repack()`；④count≤0 盒必须过滤(`SharedPackagePool.deposit` 已守)；⑤余料只托管 SavedData，绝不塞回保险库。违反任一条都会丢/复制物品 | TECHNICAL.md §3.10、§4.3 |
 
 ### 复用现有 helper(不要重新发明)
 
-- `SharedPackagePool.get(server)` — 取世界级池实例(SavedData)
-- `SharedPackagePool.deposit(vault, batch)` / `poll(vault)` / `pending(vault)` / `drainAndDrop(vault, level, pos)` — 池操作
+- `SharedPackagePool.get(server)` — 取世界级池实例(SavedData)。**key 是 `UUID` 不是 BoundingBox**（0.5.1）
+- `SharedPackagePool.deposit(uuid, batch)` / `poll(uuid)` / `pending(uuid)` / `drainAndDrop(uuid, level, pos)` — 池操作
+- `SharedPackagePool.noteMergeParticipant(uuid)` / `resolveMergeWinner(tracker)` — 双 vault 合并检测（0.5.1，内部用）
 - `PartialRepackager.tryTakeover(self, inv)` — 0.5.0 部分重组入口(由 `RepackagerBlockEntityMixin` 在 attemptToRepackage HEAD 调，返回 true 表示已处理需 cancel vanilla)
-- `PartialOrderTracker.get(server)` — 0.5.0 取世界级 tracker 实例(SavedData)。`get`/`update`/`forget`/`migrateKey`/`drainAndDrop` 与 SharedPackagePool 同生命周期模式
+- `PartialOrderTracker.get(server)` — 0.5.0 取世界级 tracker 实例(SavedData)。**key 也是 `UUID`**（0.5.1）。`get`/`update`/`forget`/`migrateKey(oldUUID, newUUID)`/`drainAndDrop` 与 SharedPackagePool 同生命周期模式
 - `PackageRepackageHelperInvoker.goddamnrepackager$repackBasedOnRecipes(...)` — 0.5.0 调用桥(cast helper 到此 interface)，部分趟渐进合成
-- `VaultIdentity.vaultBoundingBoxOf(r)` — 返回理包机所连 vault 的 `BoundingBox`(从 `InventoryIdentifier.Bounds.bounds()` 取，**不要用 `IItemHandler ==`**，§3.7)。独立工具类(非 mixin)，两个 mixin 共用
+- `VaultIdentity.vaultIdOf(r)` — 返回理包机所连 vault controller 的 `UUID`（0.5.1，从 `tb.getTarget().getConnectedPos()` 反查 BE，cast 成 `ItemVaultBlockEntityVaultIdAccessor` 读 mixin 字段）。**不要用 `IItemHandler ==` 或 BoundingBox**（§3.7/§3.11）
+- `VaultGeometry.anySiblingVaultWithUuidExists(level, pos, uuid)` — 判定 partial vs full teardown（0.5.1）
+- `ItemVaultBlockEntityVaultIdAccessor` — duck interface（根包，不是 mixin 包）：cast `ItemVaultBlockEntity` 读/写 UUID
 
 ### 访问 Create 字段的约定
 
 - `queuedExitingPackages`、`heldBox`、`animationTicks`、`animationInward`、`buttonCooldown` 全是 **public**，在 mixin 里直接 `r.heldBox` 访问，**不需要 `@Accessor`**。
-- `targetInventory`(InvManipulationBehaviour)也是 public。`getIdentifiedInventory()` 是 public 方法，用 `.identifier()` 取稳定标识。
-- `ItemVaultBlockEntity.getWidth()`/`getHeight()`/`getMainConnectionAxis()`/`getControllerBE()` 都是 public，`ConnectivityHandlerMixin` 直接用。
+- `targetInventory`(InvManipulationBehaviour)也是 public。`getIdentifiedInventory()` 是 public 方法。0.5.1 用 `tb.getTarget().getConnectedPos()` 反查邻居 vault BE（`IdentifiedInventory` 不暴露 BE）。
+- `ItemVaultBlockEntity.getWidth()/getHeight()/getMainConnectionAxis()` 都是 public 但 **teardown 中不可信**（`removeController` 把它们重置成 1，§3.9③ footgun）。0.5.1 改用 UUID 后基本不依赖这些字段。`getControllerBE()` 同样不可信（footgun）。
 
 ---
 
@@ -167,7 +174,7 @@ src/main/java/com/github/goddamnrepackager/
 
 ### alpha jar 后缀规则
 
-- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.4.0-neoforge-alpha.jar`(neoforge 分支)。
+- 当前 `mod_is_alpha=true` → jar 名为 `goddamnrepackager-0.5.1-neoforge-alpha.jar`(neoforge 分支)。
 - 文档里 jar 文件名示例要匹配(README 的安装步骤)。
 - TECHNICAL.md §5 记录了此约定。
 - 脱离 alpha 时:改 `gradle.properties` 的 `mod_is_alpha=false` + 去掉文档里 `-alpha` 后缀。
@@ -189,6 +196,7 @@ src/main/java/com/github/goddamnrepackager/
 - **§3.8**:heldBox 被动清空协议(动发送状态机前必读)
 - **§3.9**:0.4.0 共享池的七个核心陷阱(tick 注父类 / splitMulti 可见性 / reshape 用 notifyMultiUpdated 迁移 / isController footgun / vault-centric 归属 / mixin 类不能有 public static 方法 / tick HEAD 必须守 redstonePowered)
 - **§3.10**:0.5.0 部分重组的五条不变量(改 `PartialRepackager`/`PartialOrderTracker` 前必读;§2.4 是架构,§4.3 是三次失败 + 第四次成功的全过程)
+- **§3.11**【0.5.1 必读】:vault 身份从 BoundingBox 改为 UUID。动 `ItemVaultBlockEntityMixin`/`ConnectivityHandlerMixin`/`VaultIdentity`/`SharedPackagePool` 前必读——理解为什么 reshape/部分拆的判定都不能依赖几何字段、必须用 neighborhood UUID scan
 - **§4.1**:思路B 两条路径(路径①0.3.0 实现已废弃,路径②0.4.0 共享池已实现;策略 A vs B 取舍)
 
 TECHNICAL.md 的 §6(常见问题排查表)和 §5(构建复现)也是日常会用到的。

@@ -8,11 +8,12 @@ import com.simibubi.create.content.logistics.packager.PackagerBlockEntity;
 import com.simibubi.create.content.logistics.packager.repackager.RepackagerBlockEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import java.util.UUID;
 
 /**
  * Strategy A: feed the pool into each idle repackager's private queue.
@@ -54,7 +55,7 @@ public class PackagerBlockEntityMixin {
         if (!self.heldBox.isEmpty()) return;                // stalled: don't feed
         if (!self.queuedExitingPackages.isEmpty()) return;  // still digesting
 
-        BoundingBox vaultKey = VaultIdentity.vaultBoundingBoxOf(repackager);
+        UUID vaultKey = VaultIdentity.vaultIdOf(repackager);
         if (vaultKey == null) return;
 
         MinecraftServer server = level.getServer();

@@ -37,6 +37,13 @@
 > **ℹ️ If you used 0.2.0:** 0.2.0 could cause "only some repackagers work after placing an order"
 > (e.g. 6 of 9) in an existing world, requiring you to re-place the repackagers. **Fixed in 0.2.1** —
 > just upgrade, no re-placement needed. See [Known Limitations](#known-limitations).
+>
+> **ℹ️ Upgrading from 0.5.0 to 0.5.1:** 0.5.1 rewrites the vault identity scheme (from a geometry-derived
+> BoundingBox to a stable UUID), fixing item duplication/loss bugs that 0.5.0 could hit when reshaping
+> or partially breaking a vault mid-order. **0.5.0-format SavedData is not compatible with 0.5.1** — on
+> upgrade, the legacy pool is detected and cleared on load (the log will contain a
+> `[GDR-POOL] detected legacy BoundingBox-keyed SavedData` warning). Let any active orders finish
+> before upgrading; the pool is empty after upgrade, new orders work normally.
 
 **God Damn Repackager** makes all repackagers attached to the same input vault share the work.
 N repackagers ≈ N× throughput. **Available for both Forge 1.20.1 and NeoForge 1.21.1.**
@@ -51,15 +58,16 @@ jar that matches your setup.
 | **Minecraft** | 1.20.1 | 1.21.1 |
 | **Loader** | Forge 47.x | NeoForge 21.1.x |
 | **Create (required dep)** | 6.0.x (tested 6.0.8) | 6.0.x (tested 6.0.10) |
-| **Mod version** | `0.5.0-forge` | `0.5.0-neoforge` |
-| **Jar filename** | `goddamnrepackager-0.5.0-forge-alpha.jar` | `goddamnrepackager-0.5.0-neoforge-alpha.jar` |
+| **Mod version** | `0.5.1-forge` | `0.5.1-neoforge` |
+| **Jar filename** | `goddamnrepackager-0.5.1-forge-alpha.jar` | `goddamnrepackager-0.5.1-neoforge-alpha.jar` |
 
 > Choose based on whether your pack runs Forge or NeoForge.
 > If you're unsure: NeoForge 1.21.1 is recommended for new/single-player packs (more modern);
 > stick with Forge 1.20.1 for existing saves or Forge-based packs.
 >
 > Both builds are feature-identical: shared-package-pool parallelism (0.4.0) + **partial repackaging**
-> (0.5.0 — start crafting as soon as any materials arrive, see below).
+> (0.5.0 — start crafting as soon as any materials arrive) + UUID-based vault identity
+> (0.5.1 — pools survive reshape / partial vault break without duplication or loss).
 
 ## The Problem
 
@@ -113,13 +121,22 @@ are crafted and shipped immediately, and each newly arrived batch continues the 
 Materials are conserved end-to-end — unused leftovers are held in the world save and drop in full if
 the vault is broken.
 
-> **Note on breaking blocks (0.4.0):** the shared pool is saved with the world, independent of any block.
-> Breaking a repackager does **not** drop the packages still in the pool — they're kept safely in the save,
-> and placing the repackager back resumes processing (nothing is lost). Only when the **vault itself is
-> destroyed (block broken or wrench-removed)** are that vault's pooled packages dropped as item entities.
-> Reshaping a vault (adding/removing blocks to change its shape) does **not** drop the pool either — the pool
-> migrates to the new shape automatically and repackagers keep processing. Repackagers respect vanilla Create
-> redstone: they only work when powered.
+**UUID-based vault identity (new in 0.5.1):** each vault is assigned a stable UUID and repackagers
+find their shared pool by that UUID. The UUID travels with the vault through Create's multiblock
+split/reform hooks — reshaping a vault (adding/removing blocks) leaves the key unchanged, and a partial
+break (the remaining blocks re-form into a smaller vault) inherits the original UUID, so the pool keeps
+working seamlessly. This fully fixes the 0.5.0 issue where different repackagers saw different geometric
+snapshots of the same vault during a reshape, occasionally splitting the pool and causing item
+duplication or loss.
+
+> **Note on breaking blocks (0.4.0, updated in 0.5.1):** the shared pool is saved with the world,
+> independent of any block. Breaking a repackager does **not** drop the packages still in the pool —
+> they're kept safely in the save, and placing the repackager back resumes processing (nothing is lost).
+> Only when the **vault is fully destroyed (every block broken / wrench-removed)** are that vault's pooled
+> packages dropped as item entities. A **partial break** (break one block of a multiblock vault; the
+> remaining blocks re-form) does NOT drop the pool — the order keeps crafting. Reshaping a vault
+> (adding/removing blocks) does NOT drop either — the UUID key is unchanged and processing continues.
+> Repackagers respect vanilla Create redstone: they only work when powered.
 
 ## Installation
 
@@ -137,6 +154,12 @@ Installation is identical for both builds — only the jar and Create version di
 > **Upgrading from 0.3.x / 0.4.x?** Just replace the jar — no re-placement needed, in-flight orders
 > are unaffected. 0.5.0 adds partial repackaging on top of the shared pool (start crafting as soon
 > as any materials arrive); you benefit automatically with zero setup.
+>
+> **Upgrading from 0.5.0 to 0.5.1?** Just replace the jar — no re-placement needed. However, 0.5.1
+> switches the vault identity scheme from a BoundingBox to a UUID, so 0.5.0-format pool data is **not
+> compatible** and will be cleared on load (with a `[GDR-POOL] detected legacy BoundingBox-keyed
+> SavedData` log warning). Let any active orders finish before upgrading; the pool is empty after
+> upgrade, new orders work normally.
 
 ## Compatibility
 
@@ -166,9 +189,10 @@ Installation is identical for both builds — only the jar and Create version di
 - **Breaking a repackager does NOT drop the shared pool (0.4.0).** The pool is saved with the world,
   not tied to the block. Breaking a repackager only drops the single package it was mid-shipping
   (heldBox); packages still in the pool stay in the save and resume when the repackager is replaced —
-  nothing is lost. Only destroying the vault itself (breaking a block or wrench-removing) drops that
-  vault's pooled packages. Reshaping a vault (adding/removing blocks) does NOT drop — the pool migrates
-  to the new shape and processing continues.
+  nothing is lost. Only **fully destroying** the vault (every block broken or wrench-removed) drops
+  that vault's pooled packages. A **partial break** (one block of a multiblock vault; remaining blocks
+  re-form) does NOT drop — the re-formed vault inherits the same UUID and the order keeps crafting.
+  Reshaping a vault (adding/removing blocks) does NOT drop — the UUID key is unchanged (0.5.1).
 - **An order being progressively crafted needs at least one powered repackager (0.5.0).** Once an
   order is "taken over" (partial repackaging has begun), it needs at least one redstone-powered
   repackager on the vault to keep progressing. Removing all repackagers or cutting their power
