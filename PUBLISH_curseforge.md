@@ -51,8 +51,8 @@ jar that matches your setup.
 | **Minecraft** | 1.20.1 | 1.21.1 |
 | **Loader** | Forge 47.x | NeoForge 21.1.x |
 | **Create (required dep)** | 6.0.x (tested 6.0.8) | 6.0.x (tested 6.0.10) |
-| **Mod version** | `0.5.0-forge` | `0.5.0-neoforge` |
-| **Jar filename** | `goddamnrepackager-0.5.0-forge-alpha.jar` | `goddamnrepackager-0.5.0-neoforge-alpha.jar` |
+| **Mod version** | `0.5.1-forge` | `0.5.0-neoforge` |
+| **Jar filename** | `goddamnrepackager-0.5.1-forge-alpha.jar` | `goddamnrepackager-0.5.0-neoforge-alpha.jar` |
 
 > Choose based on whether your pack runs Forge or NeoForge.
 > If you're unsure: NeoForge 1.21.1 is recommended for new/single-player packs (more modern);
@@ -113,10 +113,12 @@ are crafted and shipped immediately, and each newly arrived batch continues the 
 Materials are conserved end-to-end — unused leftovers are held in the world save and drop in full if
 the vault is broken.
 
-> **Note on breaking blocks (0.4.0):** the shared pool is saved with the world, independent of any block.
+> **Note on breaking blocks (0.4.0, revised in 0.5.1):** the shared pool is saved with the world, independent of any block.
 > Breaking a repackager does **not** drop the packages still in the pool — they're kept safely in the save,
-> and placing the repackager back resumes processing (nothing is lost). Only when the **vault itself is
-> destroyed (block broken or wrench-removed)** are that vault's pooled packages dropped as item entities.
+> and placing the repackager back resumes processing (nothing is lost). Partially breaking a vault (removing
+> one block of a multi-block vault) also does **not** drop the pool — the remaining blocks re-form into a
+> smaller vault that **inherits the same identity via UUID**, so the pool and any in-progress orders keep
+> running. Only when the **last block of the vault is removed** does the entire pool drop as item entities.
 > Reshaping a vault (adding/removing blocks to change its shape) does **not** drop the pool either — the pool
 > migrates to the new shape automatically and repackagers keep processing. Repackagers respect vanilla Create
 > redstone: they only work when powered.
@@ -137,6 +139,14 @@ Installation is identical for both builds — only the jar and Create version di
 > **Upgrading from 0.3.x / 0.4.x?** Just replace the jar — no re-placement needed, in-flight orders
 > are unaffected. 0.5.0 adds partial repackaging on top of the shared pool (start crafting as soon
 > as any materials arrive); you benefit automatically with zero setup.
+>
+> **Upgrading from 0.5.0 to 0.5.1 (Forge only)?** Just replace the jar. 0.5.1 fixes item duplication
+> and loss that 0.5.0 could trigger when reshaping or partially breaking a vault (see changelog below),
+> and reworks vault identity to use a stable UUID instead of geometry-derived coordinates. **Heads-up:
+> 0.5.0's SavedData format is incompatible with 0.5.1 — the shared pool will be cleared on first load
+> after upgrade** (look for the `[GDR-POOL] detected legacy BoundingBox-keyed SavedData` warning in the
+> log). Let active orders finish before upgrading; new orders after upgrade work normally. The NeoForge
+> build remains on 0.5.0 for now and will catch up to 0.5.1 in a later release.
 
 ## Compatibility
 

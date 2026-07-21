@@ -473,26 +473,19 @@ handler 用 `(BlockEntity, CallbackInfo)` 即可）。它不覆盖 add-block res
 `com.github.goddamnrepackager.VaultIdentity`（普通 Java 类），两个 mixin 都调用 `VaultIdentity.vaultBoundingBoxOf(r)`。
 mixin 类里的 helper 方法必须是 `private`（实例方法），跨 mixin 共享的逻辑一律抽到独立类。
 
-**⑥ reshape 迁移：`notifyMultiUpdated()` 是 reshape 的唯一 public 钩子**
+**⑥ reshape 迁移（0.5.0 实现、0.5.1 已废弃——改用 UUID，见 §3.11）**
 
-`splitMulti` 不覆盖 reshape（reshape 走私有 `splitMultiAndInvalidate`，不经 `splitMulti`），所以扩建 vault
-（3×3×3 → 3×3×4）时旧 BoundingBox key 会变孤儿——池里的包匹配不上新形状，理包机取不到（表现为"订单
-卡住，拆回原形状又恢复"）。
+> **0.5.1 更新**：本节描述的 BoundingBox + `notifyMultiUpdated` + `VaultBoxTracker.migrateKey` 方案在 0.5.0
+> 上线后暴露出严重 bug——不同理包机在 reshape 期间看到的 `InventoryIdentifier.Bounds` 不一致（vanilla
+> 的 `initCapability` 按 BE 各自懒算），导致同一个 vault 的池被 BoundingBox key 分裂成多份，引发物品
+> 复制和丢失。0.5.1 改用 vault BE 上的 stable UUID 作 key（经 Create extraData 钩子跨 split/reform 传递，
+> reshape 期间 key 完全不变）。本节保留作历史背景，但 `VaultBoxTracker` 已删除、`notifyMultiUpdated`
+> 的迁移逻辑已被 UUID minting + 双 vault 合并检测取代。详见 §3.11。
 
-**解法**：注 public `ItemVaultBlockEntity.notifyMultiUpdated()`（`()V`，无参，易注入）。字节码确认它在
-reshape 路径（`tryToFormNewMulti`）里 `setWidth(newWidth)/setHeight(newLength)` **之后**调用（offset 202），
-所以 HEAD 时 `getWidth()/getHeight()/getMainConnectionAxis()/getBlockPos()` 反映**新**几何。它也在 fresh
-formation 时触发，所以用"last-known box 变化"判定 reshape：
-
-- `VaultBoxTracker`（独立工具类，`WeakHashMap<ItemVaultBlockEntity, BoundingBox>`）记录每个 controller 的
-  last-known box。WeakHashMap 在 BE 被 GC 时自动清理。
-- `notifyMultiUpdated` HEAD：算 newBox = `boxOf(self)`；若 `lastBox(self)` 存在且 ≠ newBox，调
-  `SharedPackagePool.migrateKey(oldBox, newBox)`（把 deque 原样搬到新 key，FIFO/count 不变，不 drop）；
-  然后 `remember(self, newBox)` 更新基线。首次（无 oldBox）只 remember，不 migrate。
-- teardown（`splitMulti` HEAD）时 `forget(vault)` 清掉追踪条目，避免陈旧基线。
-
-**关键**：`notifyMultiUpdated` 在 fresh formation 时会对每个 part 也调用，但只有 controller 持有真实多方块
-几何（`radius>1 || length>1`），part 的 box 是单方块位置——所以用 `isController()` + 几何大小守卫过滤。
+历史方案（不再生效）：`splitMulti` 不覆盖 reshape（reshape 走私有 `splitMultiAndInvalidate`，不经 `splitMulti`），
+所以扩建 vault（3×3×3 → 3×3×4）时旧 BoundingBox key 会变孤儿——池里的包匹配不上新形状，理包机取不到
+（表现为"订单卡住，拆回原形状又恢复"）。0.5.0 的修补是注 `notifyMultiUpdated` 在 reshape 时迁移 key，
+但这个修补本身有 race，最终被 UUID 方案取代。
 
 **⑦ tick HEAD 灌队列必须守 redstone，否则理包机无需红石也能工作**
 
@@ -546,6 +539,97 @@ vanilla 的 close-out 行为。判断末班用 `TrackedOrder.wouldComplete`（�
 重复/空洞，`isOrderComplete` 语义崩坏，且每 tick 的 extract/insert 搅动巨大。余料存
 `PartialOrderTracker`(SavedData)，vault 销毁时爆成原材料实体，reshape 时迁移 key——
 与 SharedPackagePool 同生命周期模式。
+
+### 3.11 【0.5.1 核心改动】vault 身份从 BoundingBox 改为 UUID（经 Create extraData 钩子传递）
+
+**为什么改**：0.5.0 用 `BoundingBox` 作 `SharedPackagePool`/`PartialOrderTracker` 的 key，几何派生。但
+vanilla 的 `InventoryIdentifier.Bounds` 由 `ItemVaultBlockEntity.initCapability()` **按 BE 各自懒算**——
+reshape 期间不同理包机连接的 vault BE 的 `invId` 字段可能反映**不同时刻**的几何（因为 `initCapability`
+只在 `itemCapability.invalidate()` 后下次查询时才重算）。结果：同一个 vault 的池被分裂成多份 BoundingBox
+key，理包机分别取到不同的"快照"，引发**物品复制**（多个 key 各持一份相同数据）和**丢失**（drain 时
+只命中一个 key）。日志对账：下单 192 包却发出去 256 包，多出 64 包就是分裂的 key 各持一份的明证。
+
+**业界参考**：研究 AE2、Sophisticated Storage、Mekanism、Storage Drawers 等可调整 multiblock 后发现，
+**它们普遍不做稳定的跨 reshape UUID**—— reshape 时重建并重新连接状态。我们的处境比它们难（池在 BE 外
+的 SavedData 里），不能照搬。但 Create **暴露了一个官方钩子**专门解决这个问题：
+`IMultiBlockEntityContainer` 的 extraData 三件套（`getExtraData`/`setExtraData`/`modifyExtraData`）——
+这是 Create 为"从旧 controller 把数据带到 parts，再合并进新 controller"设计的通道，今天 vault 留空没用，
+正好由我们填上。
+
+**新方案**：池 key 改为 vault BE 上的 stable `java.util.UUID`。
+
+#### UUID 怎么跨 split/reform/reshape 传递
+
+字节码确认 Create 调 extraData 三件套的精确时机：
+
+- **`ConnectivityHandler.splitMultiAndInvalidate`**（offset 339-369）：对每个 part，先
+  `partControllerBE.getExtraData()` 读，再 `part.setExtraData(extraData)` 写——**都在
+  `part.removeController(true)` 之前**。所以每个 part 在被 null controller 之前继承了原 controller 的
+  UUID（写入 part 自己的 `gdr$vaultId` 字段）。
+- **`ConnectivityHandler.tryToFormNewMultiOfWidth`**（offset 665-1074）：reform 后调
+  `self.notifyMultiUpdated()` 在新 controller 上。
+
+我们的 `ItemVaultBlockEntityMixin` 重写这三个 default 方法：
+- `getExtraData()` → 返回 `new VaultExtraData(gdr$vaultId)`（一个 plain record 载体）
+- `setExtraData(data)` → 把进来的 UUID 写入自己的 `gdr$vaultId`（如果还没设）+ 加到 `observedIds`（合并
+  检测用）+ 调 `SharedPackagePool.noteMergeParticipant(incoming)`（全局登记，让新 controller 后续
+  `notifyMultiUpdated` 能看到 sibling parts 收到的 UUID）
+- `modifyExtraData(data)` → 返回 data 不变（vanilla 在 self 上调，对我们无合并语义）
+
+`notifyMultiUpdated` HEAD 注入负责：① lazy mint UUID（首次形成时）；② 双 vault 合并检测（见下）。
+
+#### 双 vault 合并（罕见但要正确处理）
+
+两个独立 vault A 和 B 合并成一个更大的 vault 时：vanilla 的 `splitMultiAndInvalidate` 对每个 part 调
+`setExtraData`，但 parts 来自两个不同 vault——A 的 parts 继承 uuidA，B 的 parts 继承 uuidB。新 controller
+（formMulti 选出来的 max-count part）只看到自己的 UUID，看不到对方的。
+
+我们用**全局 merge-participant set** 解决：每次 `setExtraData` 收到一个 UUID，调
+`SharedPackagePool.noteMergeParticipant(uuid)` 把它登记到一个 transient set。新 controller 的
+`notifyMultiUpdated` 调 `pool.resolveMergeWinner(tracker)`：如果 set 里有 ≥ 2 个 UUID，选最小 UUID 作赢家
+（确定性），把所有输家 UUID 的池/tracker 条目 `migrateKey` 到赢家，然后清空 set。单 vault reshape 只
+登记一个 UUID，set size < 2，no-op。
+
+#### 部分拆 vs 全拆的判定（0.5.1 第三次修复）
+
+`ConnectivityHandlerMixin.splitMulti` HEAD 不能无条件 drain——拆 vault 一个 part 时，剩余 parts 会重新
+form 一个更小的 multiblock，**通过 extraData 继承同一个 UUID**，in-vault fragments 留在剩余 parts 里，
+理包机继续 craft。如果在 partial break 时 drain，池被清空但订单还在跑，下次 fragment 扫描会重新接管
+订单、重新 craft 64 包——**物品复制**（这是 0.5.1 第一版上线后立刻暴露的 regression）。
+
+判定方法（最终方案）：**neighborhood UUID scan**。从被 break 的 part 的 pos 扫 ±11 半径范围（vault 最大
+尺寸的安全余量），找还有没有 vault BE 持有同一 UUID 且未 removed。**找到 sibling → partial break，不
+drain；找不到 → 全拆，drain。**
+
+为什么不信任 `getControllerBE()`：teardown 过程中 controller 字段会被 null（§3.9③ footgun），
+`getControllerBE()` 返回 part 自己，而 part 的 `getWidth()/getHeight()` 字段被 `removeController` 重置成
+1——基于这些字段的 box scan 会算成 1×1×1，完全错过真实几何。直接按 UUID 扫邻居不依赖任何几何字段，
+最可靠。
+
+`anySiblingVaultWithUuidExists` 每次拆 vault block 都跑 23³ ≈ 12k 次 `level.getBlockEntity(p)`——O(N) 但
+break 是低频事件，可接受。
+
+#### 旧存档兼容
+
+`SharedPackagePool.load` / `PartialOrderTracker.load` 检测旧格式（vaultEntry 含 `"MinX"` 整型字段）→
+打 WARN + 返回空池。alpha 阶段强制 break：升级后池清空，玩家应让在跑订单完成后再升级。新格式用
+`vaultEntry.getUUID("VaultId")`。
+
+#### mixin 包路径陷阱（运行时崩 `IllegalClassLoadError`）
+
+`ItemVaultBlockEntityVaultIdAccessor` 接口最初放在 `com.github.goddamnrepackager.mixin` 包里。Mixin 子系统
+**禁止任何代码直接引用注册在 mixin 包里的类**——启动崩溃：
+`IllegalClassLoadError: ... is in a defined mixin package ... cannot be referenced directly`。
+修复：把 accessor interface 移到根包 `com.github.goddamnrepackager`（不在 mixin 包），mixin 类
+`implements` 它做 duck typing。
+
+#### mixin 类里 public 实例方法的边界
+
+§3.9⑤ 禁止 mixin 类里有 **public static** 方法（合并进目标类会污染 API 表面）。但 **public 实例方法**
+是允许的——尤其是用来满足 duck interface 契约（mixin 类 `implements SomeInterface` + 在 mixin 类里定义
+interface 的 public 方法，合并后目标类自动 implements 该 interface）。`ItemVaultBlockEntityMixin` 里的
+`goddamnrepackager$getVaultId()`/`setVaultId()` 和 `getExtraData()`/`setExtraData()`/`modifyExtraData()`
+都是这种模式。
 
 ---
 
@@ -742,14 +826,17 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 | 游戏启动崩溃 `non-private static method`（checkMethodVisibility） | 0.4.0：mixin 类里有 public/static 普通方法。共享 helper 必须放独立工具类（见 §3.9⑤） |
 | 游戏启动崩溃（tick） | 0.4.0：tick 注入点写错（必须注父类 PackagerBlockEntity + instanceof 守卫，见 §3.9①） |
 | 理包机无需红石也工作 | 0.4.0：tick HEAD 灌队列漏了红石守卫。加 `if (!self.redstonePowered) return;`（见 §3.9⑦） |
-| 扩建 vault 后订单卡住（拆回又恢复） | 0.4.0：reshape 没迁移池 key，旧 BoundingBox 变孤儿。需注 `notifyMultiUpdated` 迁移（见 §3.9⑥） |
+| 扩建 vault 后订单卡住（拆回又恢复） | 0.4.0：reshape 没迁移池 key。0.5.0 加了 `notifyMultiUpdated` 迁移但有 race（不同 BE 看到不同 BoundingBox）。**0.5.1 已彻底修：池 key 改用 vault UUID，reshape 期间 key 不变**（见 §3.11） |
 | 只有部分理包机工作 | 0.4.0 下应是历史问题：① 若用 0.2.0 升级到 0.2.1+（见 §3.7）。② 0.4.0 共享池架构不依赖 sibling 发现，每机独立 poll，不应再有此问题；若仍有，查 `vaultBoundingBoxOf` 是否返回 null（targetInventory 未就绪） |
 | 产物数量不对 | 0.4.0：开 `DEBUG_LOGGING` 看 `[GDR-POOL] deposited` 总量是否 == 订单数，`fed` 累计是否 == deposited。共享池是纯搬运+count 拆分，不等说明 poll/deposit 逻辑错（见 §2.3） |
 | 下游堵塞时积压不消散 | 确认 0.4.0+。堵塞机被 `!heldBox.isEmpty()` 守卫挡住不取新包，活自动流向空闲兄弟（共享池天然均衡）。开 DEBUG 看 `[GDR-POOL] fed` 是否只出现在非堵塞机 |
 | 打掉理包机后包裹"消失" | 这不是 bug——共享池跟着存档走，包裹在池里，重放理包机即恢复（见 §3.9④）。只有打掉/扳手拆除 vault 才爆池；扩建 vault 会迁移 key（不爆） |
-| 打掉/扩建 vault 后包裹没爆出来 | `ConnectivityHandlerMixin` 没注入成功（看启动日志有无 splitMulti 相关报错），或 `getControllerBE()` 返回 null（HEAD 时 controller 已被 null，见 §3.9③） |
+| 打掉/扩建 vault 后包裹没爆出来 | 0.5.1：`ConnectivityHandlerMixin` 改用 neighborhood UUID scan 判定全拆 vs 部分拆。部分拆不 drain（剩余 vault 通过 extraData 继承 UUID，订单继续跑）；只有拆到最后一个 part 时才 drain（见 §3.11）。如果完全没爆出来，看启动日志有无 mixin 报错。0.5.0 老问题（`getControllerBE()` footgun 导致算错几何）已修 |
 | 游戏启动崩溃（打开仓库管理员时） | `@Inject` 参数类型和目标方法不匹配（见 §3.3） |
 | 0.5.0：订单碎片到齐前不动工（无 `[GDR-PARTIAL]` 日志） | ① 确认订单含**合成**配方（纯物品订单永不接管，等齐走 vanilla——设计如此）。② 确认理包机红石充能。③ 确认 `vaultBoundingBoxOf` 非 null（目标是 vault 而非板条箱）。④ 确认已到材料够合成至少 1 次 |
 | 0.5.0：渐进合成中订单卡住不动 | ① 是否所有理包机被拆/红石断电——接管中的订单需要至少一台充能理包机推进。② 开 DEBUG 看是否还有 `crafted`/`final pass`；若长时间无动静且材料已到齐，查 `wouldComplete` 判定（末班应触发） |
 | 0.5.0：产物数量不对 | 开 DEBUG 对账：所有 `crafted` + `final pass` 的数量之和应 == 订单合成数；若不等，查 §3.10 五条不变量哪条被破坏（重点：count≤0 过滤、消耗==删除） |
 | 0.5.0：拆 vault 后材料对不上 | 库内未消费碎片（vanilla 掉落）+ `[GDR-PARTIAL] drained` 爆出的余料 + 已发出的产物 == 已发货材料。三者 disjoint；对不上说明 extract/托管逻辑被破坏 |
+| 0.5.1：升级后池被清空 | 0.5.0 的 BoundingBox-keyed SavedData 不兼容，load 时检测到旧格式会 WARN + 清空。alpha break——让订单跑完再升级（见 §3.11 旧存档兼容） |
+| 0.5.1：游戏启动崩 `IllegalClassLoadError: ... is in a defined mixin package` | 引用了注册在 `mixin` 包里的类。共享类必须放根包或独立非-mixin 包（见 §3.11 mixin 包路径陷阱） |
+| 0.5.1：部分拆 vault 后理包机仍在合成、且爆出物品 | 0.5.1 早期版本：splitMulti HEAD 无条件 drain 或基于 `getControllerBE()` footgun 算错几何。已改用 neighborhood UUID scan 判定 partial vs full teardown（见 §3.11）。验证：拆一个 part 不应有 `drained & dropped` 日志 |

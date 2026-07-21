@@ -11,7 +11,6 @@ import com.simibubi.create.content.logistics.stockTicker.PackageOrderWithCrafts;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.ItemStackHandler;
 
@@ -19,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Partial repackaging ("order takeover"): let repackagers start crafting as soon
@@ -75,7 +75,7 @@ public final class PartialRepackager {
         if (server == null) return false;
         // Partial repackaging is keyed per vault (tracker + shared pool). No
         // resolvable vault → conservative fallback to vanilla-only behavior.
-        BoundingBox vaultKey = VaultIdentity.vaultBoundingBoxOf(self);
+        UUID vaultKey = VaultIdentity.vaultIdOf(self);
         if (vaultKey == null) return false;
         PackageRepackageHelper helper = self.repackageHelper;
         if (helper == null) return false;
@@ -111,7 +111,7 @@ public final class PartialRepackager {
      * fragments were consumed and products deposited (caller cancels vanilla).
      */
     private static boolean tryPartialPass(RepackagerBlockEntity self, MinecraftServer server, Level level,
-                                          BoundingBox vaultKey, int orderId, List<ItemStack> fragments,
+                                          UUID vaultKey, int orderId, List<ItemStack> fragments,
                                           IItemHandler inv, PackageRepackageHelper helper) {
         PartialOrderTracker tracker = PartialOrderTracker.get(server);
         PartialOrderTracker.TrackedOrder tracked = tracker.get(vaultKey, orderId);
@@ -246,7 +246,7 @@ public final class PartialRepackager {
 
     /** Deposit products into the per-vault shared pool + fire computer events like vanilla. */
     private static void deposit(RepackagerBlockEntity self, MinecraftServer server,
-                                BoundingBox vaultKey, List<BigItemStack> boxes) {
+                                UUID vaultKey, List<BigItemStack> boxes) {
         if (self.computerBehaviour != null && self.computerBehaviour.hasAttachedComputer()) {
             for (BigItemStack bis : boxes)
                 if (bis.count > 0)
