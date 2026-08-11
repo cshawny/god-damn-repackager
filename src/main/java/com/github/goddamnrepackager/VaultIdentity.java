@@ -24,8 +24,9 @@ import java.util.UUID;
  * stable mixed-in UUID via {@link ItemVaultBlockEntityVaultIdAccessor}.</p>
  *
  * <p>Returns {@code null} if the repackager has no target inventory, the target isn't
- * a vault, or the controller BE can't be resolved. Callers fall back to vanilla
- * behavior in that case (same as 0.5.0).</p>
+ * a vault, or the controller BE can't be resolved (including the part reporting
+ * itself as its own controller, which is unreliable during split/reform/merge).
+ * Callers fall back to vanilla behavior in that case (same as 0.5.0).</p>
  *
  * --- 1.21.1 / NeoForge migration notes ---
  * On 1.21.1 {@code InvManipulationBehaviour.getInventory()} / {@code getIdentifiedInventory()}
@@ -46,6 +47,16 @@ public final class VaultIdentity {
      * read the mixed-in UUID. The UUID is lazily minted by {@code ItemVaultBlockEntityMixin}
      * on first {@code notifyMultiUpdated} — if the vault is brand-new and that hasn't
      * fired yet, we mint it here on demand.</p>
+     *
+     * <p><b>controller==null returns null (not part-fallback).</b> A previous version
+     * fell back to {@code vault} (the part BE itself) when {@code getControllerBE()}
+     * returned null. That was a defensive guard for the §3.9③ footgun during teardown,
+     * but it could read a stale UUID off the part itself during the split/reform
+     * window of a two-vault merge — the part inherits its origin vault's UUID via
+     * extraData, while the pool has already been migrated to the merge winner.
+     * Returning null lets all three callers fall back to vanilla cleanly without
+     * risk of polling a pool key that's been migrated away. See TECHNICAL.md §3.11
+     * "Two-vault merge — transient key divergence".</p>
      */
     public static UUID vaultIdOf(RepackagerBlockEntity r) {
         InvManipulationBehaviour tb = r.targetInventory;
@@ -59,13 +70,13 @@ public final class VaultIdentity {
         BlockEntity be = level.getBlockEntity(vaultPos);
         if (!(be instanceof ItemVaultBlockEntity vault)) return null;
         ItemVaultBlockEntity controller = vault.getControllerBE();
-        if (controller == null) controller = vault; // footgun guard: parts may report controller==self
+        if (controller == null) return null; // split/reform window: let callers fall back to vanilla
         ItemVaultBlockEntityVaultIdAccessor acc = (ItemVaultBlockEntityVaultIdAccessor) controller;
         UUID id = acc.goddamnrepackager$getVaultId();
         if (id == null) {
             // Vault was just placed / chunk just loaded and notifyMultiUpdated hasn't
             // fired yet. Mint on demand so deposit/poll can proceed.
-            id = java.util.UUID.randomUUID();
+            id = UUID.randomUUID();
             acc.goddamnrepackager$setVaultId(id);
             controller.setChanged();
         }

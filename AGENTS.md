@@ -41,10 +41,10 @@
 - 如果用户反馈问题，优先用 **DEBUG 日志** 定位(`GodDamnRepackager.DEBUG_LOGGING = true` 重编)。日志标记:
   - `[GDR-POOL] deposited`:理包机整理后整批入共享池
   - `[GDR-POOL] fed`:空闲理包机从池里取 1 个包
-  - `[GDR-POOL] drained & dropped`:vault **全拆**时（拆到最后一个 part）池爆出实体；部分拆不 drain（0.5.1）
+  - `[GDR-POOL] drained & dropped`:vault 方块拆除时(无论是部分拆还是全拆)按 1/N 比例把池里待发包解包成内层物品后爆出(方案 A)；查询时 N = (neighborhood scan siblings 数 + 1)。最后一块 N=1 → drain 全部剩余
   - `[GDR-PARTIAL] crafted`(0.5.0):部分趟渐进合成了一批
   - `[GDR-PARTIAL] final pass`(0.5.0):被接管订单末班收尾完成
-  - `[GDR-PARTIAL] drained`(0.5.0):vault 全拆时爆余料（0.5.1：与 pool drain 同一时机）
+  - `[GDR-PARTIAL] drained`:vault 方块拆除时按 1/N 比例把余料爆成内层物品实体（0.5.1：与 pool drain 同一时机）
   - `[GDR-POOL] two-vault merge resolved`(0.5.1):两个独立 vault 合并时输家池迁到赢家 UUID（罕见）
 
 ---
@@ -61,12 +61,12 @@ src/main/java/com/github/goddamnrepackager/
 ├── PartialOrderTracker.java        # ★ 0.5.0 世界级 SavedData：per-vault 接管订单的余料+已消费网格状态
 ├── VaultIdentity.java              # 工具类：vaultIdOf(r) 返回 vault 的 UUID(0.5.1，从 controller BE mixin 字段读)
 ├── VaultExtraData.java             # record 载体(0.5.1)：UUID 穿过 Create extraData Object 通道
-├── VaultGeometry.java              # 工具类(0.5.1)：anySiblingVaultWithUuidExists 判定 partial vs full teardown
+├── VaultGeometry.java              # 工具类(0.5.1)：countSiblingsWithUuid 计算 vault 拆前总块数 N（方案 A）
 ├── ItemVaultBlockEntityVaultIdAccessor.java  # duck interface(0.5.1，**根包**非 mixin 包)：UUID 字段桥
 └── mixin/
     ├── RepackagerBlockEntityMixin.java   # @Inject attemptToRepackage HEAD(部分接管,cancellable) + @Redirect addAll → 入池
     ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机从池 poll(注父类，instanceof 守卫，须 redstonePowered)
-    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 全拆时 drop 池+余料(0.5.1：neighborhood UUID scan 判 partial/full)
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti(public) → vault 拆除时 1/N drain 池+余料(方案 A：countSiblingsWithUuid 算 N；解包内层物品后爆出；HEAD 处 fallback UUID + propagateVaultIdToSiblings)
     ├── ItemVaultBlockEntityMixin.java    # ★ 0.5.1 核心：UUID 字段 + extraData 三件套 + NBT 持久化 + notifyMultiUpdated(合并检测+lazy mint)
     └── PackageRepackageHelperInvoker.java # @Invoker repackBasedOnRecipes(protected → 调用桥，0.5.0)
 ```
@@ -82,7 +82,7 @@ src/main/java/com/github/goddamnrepackager/
 | `@Inject(@At("HEAD"), cancellable)` | `RepackagerBlockEntity.attemptToRepackage` | **0.5.0 部分重组**:零副作用预扫描，命中部分/末班趟则 cancel vanilla(见 TECHNICAL.md §2.4) |
 | `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | **整批入池**:winner repack 后(完整订单走 vanilla 时)deposit 进共享池(不入私有队列) |
 | `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`(注**父类**!) | **策略 A 灌队列**:空闲理包机每 tick 从池 poll 1 个包进私有队列。handler 内 `instanceof Repackager` 早退 |
-| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 全拆时 drop 池+余料(0.5.1)**：用 neighborhood UUID scan 判定 partial vs full teardown。部分拆不 drain（剩余 vault 通过 extraData 继承 UUID，订单继续跑）；只有拆到最后一个 part 才 drain |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`(public，覆盖 break/wrench) | **vault 拆除时 1/N drain(方案 A)**：每次拆一个 vault block 都 drain 1/N 的池 + 余料，解包内层物品后爆出(0.5.1 后续加固)。HEAD 先做 UUID fallback(broken UUID null 时通过 `brokenVault.getControllerBE()` 读 controller UUID) + `VaultGeometry.propagateVaultIdToSiblings` 把 UUID 预传幸存部件,再 `countSiblingsWithUuid` 算 N = (siblingCount + 1) = 拆前 vault 块数,最后一块 N=1 → drain 全部剩余。不依赖 `getControllerBE()` 做 **几何**判定（§3.9③ footgun） |
 | `@Inject(@At("HEAD"))` + `@Inject write/read RETURN` + extraData 三件套 | `ItemVaultBlockEntity.notifyMultiUpdated` + `write/read` + `getExtraData/setExtraData/modifyExtraData` | **★ 0.5.1 核心**：UUID 字段 NBT 持久化、经 extraData 跨 split/reform/reshape 传递、双 vault 合并检测、lazy mint。reshape 期间 key 完全不变 |
 | `@Invoker` | `PackageRepackageHelper.repackBasedOnRecipes`(protected) | **0.5.0**:暴露 protected 方法供部分趟渐进合成(interface mixin) |
 
@@ -92,9 +92,10 @@ src/main/java/com/github/goddamnrepackager/
 |---|---|---|
 | `heldBox` 字段的**赋值/清空** | 清空是被动的(下游 `PackagerItemHandler.extractItem` 抽走才清)，打断此协议会死锁，物品复制/丢失风险极高 | TECHNICAL.md §3.8 |
 | 父类 `PackagerBlockEntity.tick()` 里 offset 67-132 的取件逻辑(`get(0)`/`count--`/`remove`) | 这是发送状态机的心脏，且 Repackager **不重写 tick**。0.4.0 只在 tick HEAD 灌队列(策略 A)，**不拦 get(0)**(那是策略 B，高危)。注 tick 必须 `@Mixin(PackagerBlockEntity.class)` + `instanceof` 守卫 | TECHNICAL.md §3.8、§3.9①、§4.1 |
-| `BigItemStack.count` 的语义 | `count` 是"该包裹要发几次"，不是"包裹有几个"。pool.poll() 按 count 拆分(>1 只取 1 份)，drainAndDrop 按 count 全量 drop | TECHNICAL.md §3.5 |
+| `BigItemStack.count` 的语义 | `count` 是"该包裹要发几次"，不是"包裹有几个"。pool.poll() 按 count 拆分(>1 只取 1 份)，drainAndDrop/drainAndDropFraction 按 count 解包内层物品并按 maxStack 切分 drop（方案 A：爆出物品不是 PackageItem 实体） | TECHNICAL.md §3.5、§3.11"方案 A" |
 | Mixin 配置注册 | NeoForge 不再用 MixinGradle / `mixin {}` 块 / jar manifest 的 `MixinConfigs` 属性。改成 `neoforge.mods.toml` 里的 `[[mixins]] config="..."` 表(NeoForge 靠这个发现 mixin 配置)。Mixin 本体已内嵌进 NeoForge。**Forge 1.20.1 的 MixinGradle 方案在本分支完全作废** | TECHNICAL.md §3.1 |
-| `splitMulti` vs `splitMultiAndInvalidate` + `isController()` footgun + partial/full 判定 | vault 销毁只能注 public `splitMulti`(break/wrench 覆盖)。private `splitMultiAndInvalidate` 因 SearchCache 是 package-private **无法注入**。teardown 后 `isController()`/`getControllerBE()` 不可信（§3.9③ footgun）。**0.5.1**: 池 key 改用 UUID（不再 BoundingBox），reshape 时 key 不变；partial vs full teardown 用 `VaultGeometry.anySiblingVaultWithUuidExists` 判定，**不能**依赖 `getControllerBE()`/几何字段 | TECHNICAL.md §3.9②③⑥、§3.11 |
+| `splitMulti` vs `splitMultiAndInvalidate` + `isController()` footgun + 1/N drain 判定 | vault 销毁只能注 public `splitMulti`(break/wrench 覆盖)。private `splitMultiAndInvalidate` 因 SearchCache 是 package-private **无法注入**。teardown 后 `isController()`/`getControllerBE()` 做几何判定不可信（§3.9③ footgun），**但 splitMulti HEAD 时 `removeController` 还没跑** —— 我们对 BE 上读 UUID 字段 + 通过 `getControllerBE()` 回查 UUID 仍是安全的。**0.5.1 后续(方案 A)**: 池 key 仍是 UUID；partial/full 判定已废弃——每次拆 1 个 block 都按 1/N 比例 drain 池+余料；N 用 `VaultGeometry.countSiblingsWithUuid` 计算（siblingCount + 1），最后一块 N=1 → drain 全部。drain 出的物品是解包后的内层 ItemStack 而不是 PackageItem 实体 | TECHNICAL.md §3.9②③⑥、§3.11"方案 A: 1/N drain" |
+| `gdr$vaultId` 字段只在 controller BE 上由 `notifyMultiUpdated` mint（§3.11） | 非-controller 部件 UUID 字段初始 null,只靠 `splitMultiAndInvalidate` body 的 `setExtraData` 才被传播过去 —— 但该 body 在 splitMulti **HEAD 之后**跑。不预传时拆 controller 首破 → siblings UUID 全 null → `countSiblingsWithUuid` 返回 0 → N=1 整池爆光;拆非-controller 首破 → broken UUID 为 null → 早 return 不 drain。**必须**在 HEAD 处先 fallback(`getControllerBE`)+ `propagateVaultIdToSiblings` 预传 UUID 给同 controller 的幸存部件 | TECHNICAL.md §3.11"gdr\$vaultId 的传播时机" |
 | tick HEAD 灌队列必须守 `redstonePowered` | vanilla tick() 本身无红石检查(靠 lazyTick GATE 1)，我们的 tick 注入直接灌队列会绕过红石门。加 `if (!self.redstonePowered) return;`(见 §3.9⑦) | TECHNICAL.md §3.9⑦ |
 | 部分重组的五条不变量(0.5.0) | 改 `PartialRepackager`/`PartialOrderTracker` 前必须逐条核对 §3.10：①绝不在 `addPackageFragment` 层触发 repack；②预扫描零副作用；③部分趟只调 `repackBasedOnRecipes`、末班才调 `repack()`；④count≤0 盒必须过滤(`SharedPackagePool.deposit` 已守)；⑤余料只托管 SavedData，绝不塞回保险库。违反任一条都会丢/复制物品 | TECHNICAL.md §3.10、§4.3 |
 
@@ -102,12 +103,14 @@ src/main/java/com/github/goddamnrepackager/
 
 - `SharedPackagePool.get(server)` — 取世界级池实例(SavedData)。**key 是 `UUID` 不是 BoundingBox**（0.5.1）
 - `SharedPackagePool.deposit(uuid, batch)` / `poll(uuid)` / `pending(uuid)` / `drainAndDrop(uuid, level, pos)` — 池操作
+- `SharedPackagePool.drainAndDropFraction(uuid, level, pos, N)` — 按方案 A drain `floor(pending/N) + Bernoulli(frac(pending/N))` 个包(期望严格 = pending/N)并解包内层物品爆出（0.5.1 后续；见 §3.11"方案 A"）
 - `SharedPackagePool.noteMergeParticipant(uuid)` / `resolveMergeWinner(tracker)` — 双 vault 合并检测（0.5.1，内部用）
 - `PartialRepackager.tryTakeover(self, inv)` — 0.5.0 部分重组入口(由 `RepackagerBlockEntityMixin` 在 attemptToRepackage HEAD 调，返回 true 表示已处理需 cancel vanilla)
-- `PartialOrderTracker.get(server)` — 0.5.0 取世界级 tracker 实例(SavedData)。**key 也是 `UUID`**（0.5.1）。`get`/`update`/`forget`/`migrateKey(oldUUID, newUUID)`/`drainAndDrop` 与 SharedPackagePool 同生命周期模式
+- `PartialOrderTracker.get(server)` — 0.5.0 取世界级 tracker 实例(SavedData)。**key 也是 `UUID`**（0.5.1）。`get`/`update`/`forget`/`migrateKey(oldUUID, newUUID)`/`drainAndDrop(uuid, level, pos)`/`drainAndDropFraction(uuid, level, pos, N)` 与 SharedPackagePool 同生命周期模式
 - `PackageRepackageHelperInvoker.goddamnrepackager$repackBasedOnRecipes(...)` — 0.5.0 调用桥(cast helper 到此 interface)，部分趟渐进合成
 - `VaultIdentity.vaultIdOf(r)` — 返回理包机所连 vault controller 的 `UUID`（0.5.1，从 `tb.getTarget().getConnectedPos()` 反查 BE，cast 成 `ItemVaultBlockEntityVaultIdAccessor` 读 mixin 字段）。**不要用 `IItemHandler ==` 或 BoundingBox**（§3.7/§3.11）
-- `VaultGeometry.anySiblingVaultWithUuidExists(level, pos, uuid)` — 判定 partial vs full teardown（0.5.1）
+- `VaultGeometry.countSiblingsWithUuid(level, pos, uuid)` — 计算 vault 当前拆除前的总块数 N（方案 A，siblingCount + 1）
+- `VaultGeometry.propagateVaultIdToSiblings(level, brokenPos, controllerPos, uuid)` — 在 splitMulti HEAD 时**提前**把 vault 的 UUID 写到所有同 controller 的幸存部件上,避免拆 controller 时 N=1 + 池孤儿化(0.5.1 方案 A 修复;见 §3.11"gdr\$vaultId 的传播时机")
 - `ItemVaultBlockEntityVaultIdAccessor` — duck interface（根包，不是 mixin 包）：cast `ItemVaultBlockEntity` 读/写 UUID
 
 ### 访问 Create 字段的约定
@@ -196,7 +199,7 @@ src/main/java/com/github/goddamnrepackager/
 - **§3.8**:heldBox 被动清空协议(动发送状态机前必读)
 - **§3.9**:0.4.0 共享池的七个核心陷阱(tick 注父类 / splitMulti 可见性 / reshape 用 notifyMultiUpdated 迁移 / isController footgun / vault-centric 归属 / mixin 类不能有 public static 方法 / tick HEAD 必须守 redstonePowered)
 - **§3.10**:0.5.0 部分重组的五条不变量(改 `PartialRepackager`/`PartialOrderTracker` 前必读;§2.4 是架构,§4.3 是三次失败 + 第四次成功的全过程)
-- **§3.11**【0.5.1 必读】:vault 身份从 BoundingBox 改为 UUID。动 `ItemVaultBlockEntityMixin`/`ConnectivityHandlerMixin`/`VaultIdentity`/`SharedPackagePool` 前必读——理解为什么 reshape/部分拆的判定都不能依赖几何字段、必须用 neighborhood UUID scan
+- **§3.11**【0.5.1 必读】：vault 身份从 BoundingBox 改为 UUID。动 `ItemVaultBlockEntityMixin`/`ConnectivityHandlerMixin`/`VaultIdentity`/`SharedPackagePool` 前必读——理解为什么 reshape/部分拆的判定都不能依赖几何字段、必须用 neighborhood UUID scan。**0.5.1 后续(方案 A)**：拆 vault 方块改用 1/N 比例 drain + 解包内层物品爆出。orderId 撞号检测日志的语义见 §3.11"双 vault 合并的两个边界风险与防御"
 - **§4.1**:思路B 两条路径(路径①0.3.0 实现已废弃,路径②0.4.0 共享池已实现;策略 A vs B 取舍)
 
 TECHNICAL.md 的 §6(常见问题排查表)和 §5(构建复现)也是日常会用到的。

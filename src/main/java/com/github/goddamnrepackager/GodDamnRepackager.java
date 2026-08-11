@@ -6,6 +6,8 @@ import net.neoforged.fml.common.Mod;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Random;
+
 /**
  * Mod entry point. The real work happens in the Mixins.
  *
@@ -25,6 +27,16 @@ public class GodDamnRepackager {
      * load-balancing behavior.
      */
     public static boolean DEBUG_LOGGING = false;
+
+    /**
+     * Server-thread Random for {@code 方案 A} drain amount stochastic rounding in
+     * {@link SharedPackagePool#drainAndDropFraction} and
+     * {@link PartialOrderTracker#drainAndDropFraction}. Every drain call lands on
+     * the server thread (splitMulti runs in main-thread block break / wrench),
+     * so a single non-thread-safe Random is safe — no synchronization needed.
+     * See TECHNICAL.md §3.11 "方案 A: 1/N drain".
+     */
+    public static final Random DRAIN_RANDOM = new Random();
 
     /**
      * NeoForge passes the mod event bus and mod container as constructor parameters

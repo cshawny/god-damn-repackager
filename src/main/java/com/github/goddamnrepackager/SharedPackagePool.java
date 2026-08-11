@@ -2,6 +2,8 @@ package com.github.goddamnrepackager;
 
 import com.mojang.serialization.DataResult;
 import com.simibubi.create.content.logistics.BigItemStack;
+import com.simibubi.create.content.logistics.box.PackageItem;
+import com.simibubi.create.content.logistics.packager.InventorySummary;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
@@ -14,6 +16,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.phys.Vec3;
+import net.neoforged.neoforge.items.ItemStackHandler;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -219,34 +222,162 @@ public class SharedPackagePool extends SavedData {
         return sum;
     }
 
-    /**
-     * Vault destroyed: drain this vault's pool and drop as item entities.
-     * Idempotent — safe if the pool was already drained or never existed.
-     */
-    public void drainAndDrop(UUID vault, Level level, BlockPos pos) {
-        Deque<BigItemStack> deque = pools.remove(vault);
-        if (deque == null || deque.isEmpty()) return;
-        Vec3 dropPos = Vec3.atCenterOf(pos);
-        int dropped = 0;
-        for (BigItemStack bis : deque) {
-            int n = Math.max(0, bis.count);
-            for (int i = 0; i < n; i++) {
-                ItemStack stack = bis.stack.copy();
-                if (!stack.isEmpty()) {
-                    ItemEntity entity = new ItemEntity(level, dropPos.x, dropPos.y + 0.5, dropPos.z, stack);
-                    entity.setDefaultPickUpDelay();
-                    level.addFreshEntity(entity);
-                    dropped++;
-                }
-            }
-        }
-        deque.clear();
-        setDirty();
-        if (dropped > 0 && GodDamnRepackager.DEBUG_LOGGING) {
-            GodDamnRepackager.LOGGER.info(
-                    "[GDR-POOL] drained & dropped {} package(s) at vault {}", dropped, pos);
+/**
+ * Drain this vault's entire pool and drop the inner contents of every
+ * package as item entities. The package shells (with their recipient address
+ * NBT) are discarded — a vault being torn down has no recipient to honor
+ * anyway, and dropping unpacked items matches the vanilla intuition of
+ * "vault contents on the ground" without exceeding entity-count expectations
+ * for high-stack products. See TECHNICAL.md §3.11 "方案 A: 1/N drain".
+ *
+ * <p>Idempotent — safe if the pool was already drained or never existed.</p>
+ */
+public void drainAndDrop(UUID vault, Level level, BlockPos pos) {
+    Deque<BigItemStack> deque = pools.remove(vault);
+    if (deque == null || deque.isEmpty()) return;
+    InventorySummary summary = new InventorySummary();
+    int packages = 0;
+    for (BigItemStack bis : deque) {
+        int n = Math.max(0, bis.count);
+        for (int i = 0; i < n; i++) {
+            InventorySummary inner = unpackOne(bis.stack);
+            summary.add(inner);
+            packages++;
         }
     }
+    deque.clear();
+    setDirty();
+    int dropped = dropSummary(level, pos, summary);
+    if (dropped > 0 && GodDamnRepackager.DEBUG_LOGGING) {
+        GodDamnRepackager.LOGGER.info(
+                "[GDR-POOL] drained & dropped {} item entity(ies) (unpacked from {} package(s)) at vault {}",
+                dropped, packages, pos);
+    }
+}
+
+/**
+ * Drain a {@code 1/N} fraction of this vault's pool and drop the unpacked
+ * inner contents as item entities. Used on every vault block break (partial
+ * or full) — N is the vault's pre-break block count: each broken block "owns"
+ * approximately 1/N of the pool's backlog, so dropping that share at the
+ * break site visually matches a vault emptying its own contents rather than
+ * a single block exploding a huge backlog that could never fit inside it.
+ * The last block break (N=1) drains the remainder deterministically.
+ *
+ * <p><b>Stochastic rounding</b>: the take count is
+ * {@code floor(pending/N) + Bernoulli(frac(pending/N))} — i.e. the integer
+ * part is always drained, and the fractional part drains with probability
+ * equal to itself. This makes the <b>expected</b> drain exactly
+ * {@code pending/N} per break (matching the "1/N share" intent), while
+ * keeping the actual take a non-negative integer so we never drop a
+ * fractional package. Over many breaks of the same vault the random draws
+ * average out and the total expected drain equals the original backlog
+ * exactly — no item loss, no duplication.</p>
+ *
+ * <p>Example: N=27, pending=6 → each break drains 1 with probability 6/27
+ * and 0 with probability 21/27 (expected 6/27 ≈ 0.22). N=27, pending=30 →
+ * each break drains 1 deterministically, plus a 2nd package with probability
+ * 3/27 (expected 30/27 ≈ 1.11). Compare with the previous ceil-rounding
+ * which would drain 1 deterministically for both cases (over-draining small
+ * backlogs and under-draining large ones).</p>
+ *
+ * <p>{@link #takePackages} splits the head entry when its {@code count > 1};
+ * the deque's FIFO order is preserved for the surviving tail.</p>
+ */
+public void drainAndDropFraction(UUID vault, Level level, BlockPos pos, int N) {
+    if (N <= 0) N = 1; // defensive: should never happen, but avoid div-by-zero
+    Deque<BigItemStack> deque = pools.get(vault);
+    if (deque == null || deque.isEmpty()) return;
+    int pending = pending(vault);
+    int base = pending / N;                  // floor(pending / N): drained deterministically
+    int remainder = pending % N;           // fractional part numerator
+    int packagesToTake = base;
+    if (remainder > 0 && GodDamnRepackager.DRAIN_RANDOM.nextInt(N) < remainder) {
+        packagesToTake++;                   // drain one more with prob = remainder/N
+    }
+    InventorySummary summary = new InventorySummary();
+    int taken = takePackages(deque, packagesToTake, summary);
+    if (deque.isEmpty()) pools.remove(vault);
+    setDirty();
+    if (taken == 0) return;
+    int dropped = dropSummary(level, pos, summary);
+    if (dropped > 0 && GodDamnRepackager.DEBUG_LOGGING) {
+        GodDamnRepackager.LOGGER.info(
+                "[GDR-POOL] drained & dropped {} item entity(ies) (unpacked from {} of {} package(s), 1/{} share) at vault {}",
+                dropped, taken, taken + pending(vault), N, pos);
+    }
+}
+
+/**
+ * Pop up to {@code k} package units from the head of {@code deque}, splitting
+ * the head entry when its {@code count > 1}. Each popped unit is unpacked into
+ * its inner contents and accumulated into {@code summary}. Returns the number
+ * of units actually taken (may be less than k if the deque held fewer).
+ */
+private int takePackages(Deque<BigItemStack> deque, int k, InventorySummary summary) {
+    int taken = 0;
+    while (taken < k && !deque.isEmpty()) {
+        BigItemStack head = deque.peekFirst();
+        if (head.count <= 0) {
+            deque.pollFirst();
+            continue;
+        }
+        // Take one unit (split off count=1 if the head entry has multiple).
+        InventorySummary inner = unpackOne(head.stack);
+        summary.add(inner);
+        head.count--;
+        taken++;
+        if (head.count <= 0) deque.pollFirst();
+    }
+    return taken;
+}
+
+/**
+ * Unpack a single PackageItem ItemStack into an {@link InventorySummary} of
+ * its inner contents. Each PackageItem holds an {@link ItemStackHandler} with
+ * up to 9 inner slots — the actual crafting products the package ships.
+ * Non-package stacks drop through defensively as themselves.
+ */
+private static InventorySummary unpackOne(ItemStack packageStack) {
+    InventorySummary out = new InventorySummary();
+    if (packageStack == null || packageStack.isEmpty()) return out;
+    if (!PackageItem.isPackage(packageStack)) {
+        out.add(packageStack);
+        return out;
+    }
+    ItemStackHandler contents = PackageItem.getContents(packageStack);
+    for (int slot = 0; slot < contents.getSlots(); slot++) {
+        ItemStack inner = contents.getStackInSlot(slot);
+        if (!inner.isEmpty()) out.add(inner);
+    }
+    return out;
+}
+
+/**
+ * Drop an {@link InventorySummary} as item entities at {@code (pos.x, pos.y + 0.5, pos.z)},
+ * each inner stack split by its max stack size (so a 9000-ingot summary yields
+ * ~141 entities, not one impossible 9000-stack). Returns the entity count.
+ */
+private static int dropSummary(Level level, BlockPos pos, InventorySummary summary) {
+    Vec3 dropPos = Vec3.atCenterOf(pos);
+    int dropped = 0;
+    for (BigItemStack bis : summary.getStacks()) {
+        int remaining = Math.max(0, bis.count);
+        while (remaining > 0) {
+            int n = Math.min(remaining, bis.stack.getMaxStackSize());
+            ItemStack stack = bis.stack.copy();
+            stack.setCount(n);
+            if (!stack.isEmpty()) {
+                ItemEntity entity = new ItemEntity(level, dropPos.x, dropPos.y + 0.5, dropPos.z, stack);
+                entity.setDefaultPickUpDelay();
+                level.addFreshEntity(entity);
+                dropped++;
+            }
+            remaining -= n;
+        }
+    }
+    return dropped;
+}
 
     // ---------------------------------------------------------------------------
     // Two-vault merge support. See TECHNICAL.md §3.11 "Two-vault merge".

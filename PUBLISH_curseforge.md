@@ -129,14 +129,31 @@ working seamlessly. This fully fixes the 0.5.0 issue where different repackagers
 snapshots of the same vault during a reshape, occasionally splitting the pool and causing item
 duplication or loss.
 
-> **Note on breaking blocks (0.4.0, updated in 0.5.1):** the shared pool is saved with the world,
-> independent of any block. Breaking a repackager does **not** drop the packages still in the pool —
-> they're kept safely in the save, and placing the repackager back resumes processing (nothing is lost).
-> Only when the **vault is fully destroyed (every block broken / wrench-removed)** are that vault's pooled
-> packages dropped as item entities. A **partial break** (break one block of a multiblock vault; the
-> remaining blocks re-form) does NOT drop the pool — the order keeps crafting. Reshaping a vault
-> (adding/removing blocks) does NOT drop either — the UUID key is unchanged and processing continues.
-> Repackagers respect vanilla Create redstone: they only work when powered.
+**Per-block 1/N drain on vault block break (0.5.1 follow-up, "Plan A"):** the original 0.5.1 only dropped
+the entire pool as PackageItem shells at full teardown (single vault block exploding a backlog exceeding
+its own physical capacity, in an unfamiliar entity form). Plan A now drains a 1/N share of the pool
+on **every** vault block break (partial or full), where N is the vault's pre-break block count: the
+packages taken are **unpacked to their inner contents** (plain ItemStacks, no recipient address) and
+dropped as ordinary item entities at the broken block's position. The remaining blocks re-form into a
+smaller vault that inherits the same UUID, and the remaining (N-1)/N of the pool keeps flowing through
+repackagers. Breaking the blocks one by one drops 1/N at a time, and the last block (N=1) drains the
+remainder — the total dropped equals what "break the whole vault at once" would have dropped. **Reshape
+by adding blocks** does NOT drop — the pool migrates to the new shape and keeps flowing. Note: **reshape
+by removing a block** follows the same break path, so undoing a reshape will drop 1/N of the pool as
+items (pick them up — they're already-crafted products and usable).
+
+> **Note on breaking blocks (0.5.1+ Plan A):** the shared pool is saved with the world, independent of any block.
+> Breaking a repackager does **not** drop the packages still in the pool — they're kept safely in the save,
+> and placing the repackager back resumes processing (nothing is lost). When any **vault block is broken** (either
+> partial or full teardown), the share of the pool "owned" by that block (1/N of the current backlog, where N is
+> the vault's pre-break block count) is **unpacked to its inner contents** and dropped as ordinary item entities at
+> the broken block's position. The remaining blocks re-form into a smaller vault that inherits the same UUID, and
+> the remaining (N-1)/N of the pool keeps flowing through repackagers. When you break vault blocks one by one,
+> each break drops its 1/N share, and the last block (N=1) drains the remainder — the total dropped equals what
+> "break the whole vault at once" would have dropped. **Reshape by adding blocks** (expanding the vault) does
+> **not** drop the pool — it migrates to the new shape and keeps flowing. Note: **reshape by removing a block**
+> follows the same break path, so undo a reshape will drop 1/N of the pool as items (pick them up — they're
+> already-crafted products and usable). Repackagers respect vanilla Create redstone: they only work when powered.
 
 ## Installation
 
@@ -189,10 +206,12 @@ Installation is identical for both builds — only the jar and Create version di
 - **Breaking a repackager does NOT drop the shared pool (0.4.0).** The pool is saved with the world,
   not tied to the block. Breaking a repackager only drops the single package it was mid-shipping
   (heldBox); packages still in the pool stay in the save and resume when the repackager is replaced —
-  nothing is lost. Only **fully destroying** the vault (every block broken or wrench-removed) drops
-  that vault's pooled packages. A **partial break** (one block of a multiblock vault; remaining blocks
-  re-form) does NOT drop — the re-formed vault inherits the same UUID and the order keeps crafting.
-  Reshaping a vault (adding/removing blocks) does NOT drop — the UUID key is unchanged (0.5.1).
+  nothing is lost. Breaking a **vault block** (partial or full teardown) drops 1/N of the pool
+  **unpacked to inner item entities** at the broken block's position (where N = the vault's pre-break
+  block count; Plan A, 0.5.1+). Each break drops its 1/N share, and the last block (N=1) drains the
+  remainder. **Reshaping by adding blocks** does NOT drop — the pool migrates to the new shape and
+  processing continues. Note: **reshaping by removing a block** follows the break path and will drop
+  its 1/N share — pick them up (they're already-crafted products and usable).
 - **An order being progressively crafted needs at least one powered repackager (0.5.0).** Once an
   order is "taken over" (partial repackaging has begun), it needs at least one redstone-powered
   repackager on the vault to keep progressing. Removing all repackagers or cutting their power

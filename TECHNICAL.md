@@ -54,12 +54,12 @@ src/main/java/com/github/goddamnrepackager/
 ├── PartialOrderTracker.java        # ★ 0.5.0 世界级 SavedData:per-vault 接管订单的余料+网格状态
 ├── VaultIdentity.java              # 工具类:解析理包机所连 vault controller 的稳定 UUID(0.5.1)
 ├── VaultExtraData.java             # record 载体(0.5.1):UUID 穿过 Create extraData Object 通道
-├── VaultGeometry.java              # 工具类(0.5.1):anySiblingVaultWithUuidExists 判定 partial vs full teardown
+├── VaultGeometry.java              # 工具类(0.5.1):countSiblingsWithUuid 计算 vault 拆前总块数 N（方案 A）
 ├── ItemVaultBlockEntityVaultIdAccessor.java  # duck interface(0.5.1,**根包**非 mixin 包):UUID 字段桥
 └── mixin/
     ├── RepackagerBlockEntityMixin.java   # @Inject attemptToRepackage HEAD(部分接管) + @Redirect addAll → 整批入池
     ├── PackagerBlockEntityMixin.java     # @Inject tick HEAD → 空闲理包机 poll(注父类 + instanceof 守卫)
-    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti HEAD → vault 全拆时 drop 池+余料(0.5.1:neighborhood UUID scan 判 partial/full)
+    ├── ConnectivityHandlerMixin.java     # @Inject splitMulti HEAD → vault 拆除时 1/N drain 池+余料(方案 A:countSiblingsWithUuid 算 N；解包内层物品后爆出；HEAD 处 fallback UUID + propagateVaultIdToSiblings)
     ├── ItemVaultBlockEntityMixin.java    # ★ 0.5.1 核心:UUID 字段 + extraData 三件套 + NBT 持久化 + notifyMultiUpdated(合并检测+lazy mint)
     └── PackageRepackageHelperInvoker.java # @Invoker repackBasedOnRecipes(protected → 调用桥,0.5.0)
 
@@ -82,7 +82,7 @@ src/main/templates/META-INF/
 | `@Inject(@At("HEAD"), cancellable)` | `RepackagerBlockEntity.attemptToRepackage` | **0.5.0 部分重组**：零副作用预扫描，命中部分/末班趟则 cancel vanilla（见 §2.4） |
 | `@Redirect` | `RepackagerBlockEntity.attemptToRepackage` 的 `List.addAll` | 整批入池：winner repack 后（完整订单走 vanilla 时）不再塞进自己队列，而是 deposit 进共享池 |
 | `@Inject(@At("HEAD"))` | `PackagerBlockEntity.tick`（注父类，因为 Repackager 不重写 tick） | 策略 A：空闲理包机每 tick 从池里 poll 1 个包灌进自己私有队列（须 `redstonePowered`） |
-| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`（public，覆盖 break/wrench） | **0.5.1**：用 neighborhood UUID scan 判定 partial vs full teardown，**只有全拆**才把该 vault 的共享池与 PartialOrderTracker 余料清空并爆出实体 |
+| `@Inject(@At("HEAD"))` | `ConnectivityHandler.splitMulti`（public，覆盖 break/wrench） | vault 方块拆除时按 1/N drain 池 + 1/N drain 被接管订单的余料；解包内层物品后爆出（方案 A，0.5.1 后续；见 §3.11"方案 A"）。HEAD 处异步做两件加固:① broken part UUID 为 null 时 fallback 用 `brokenVault.getControllerBE()` 读 controller UUID（此刻 `removeController` 未跑,controller BE 仍活）;② 调 `VaultGeometry.propagateVaultIdToSiblings` 提前把 UUID 写到所有同 controller 的幸存部件上,避免拆 controller 时 N=1 + 池孤儿化（见 §3.11"gdr\$vaultId 的传播时机"） |
 | `@Inject(@At("HEAD"))` + `@Inject write/read RETURN` + extraData 三件套 | `ItemVaultBlockEntity.notifyMultiUpdated` + `write/read` + `getExtraData/setExtraData/modifyExtraData` | **★ 0.5.1 核心**：UUID 字段 NBT 持久化、经 extraData 跨 split/reform/reshape 传递、双 vault 合并检测、lazy mint |
 | `@Invoker` | `PackageRepackageHelper.repackBasedOnRecipes`（protected） | **0.5.0**：暴露 protected 方法供部分趟渐进合成（interface mixin，非合并方法） |
 
@@ -145,8 +145,7 @@ if (pkg != null) queuedExitingPackages.add(pkg);  // 灌进私有队列尾部
 
 - **不复制**：整批 deposit 后只存在池里一份；poll 每次只拆出 1 份，count 严格递减
 - **不丢失**：共享池是 `SavedData`，区块卸载/重进存档都保留（不随 BlockEntity 销毁）
-- **vault 销毁/reshape 不吞包**：`ConnectivityHandlerMixin` 在 vault 销毁时 drainAndDrop，
-  池里的包全爆成实体（见 §3.9 的 vault-centric 归属模型）
+- **vault 拆除不吞包**：`ConnectivityHandlerMixin` 在 vault 拆除时按 1/N drain 池 + 余料，解包内层物品后爆出实体（方案 A，见 §3.9 的 vault-centric 归属模型 + §3.11"方案 A"）
 - **不干扰原版碎片清理**：redirect 的 addAll 在原版清空保险库碎片逻辑之后执行，碎片逻辑不动
 
 ### 2.4 部分重组（0.5.0 架构）：订单接管 + 余料托管 + 末班 vanilla 收尾
@@ -193,8 +192,8 @@ if (pkg != null) queuedExitingPackages.add(pkg);  // 灌进私有队列尾部
 
 **`PartialOrderTracker`（新增世界级 SavedData）**：与 `SharedPackagePool` 同生命周期模式——
 per-vault 按 **UUID** 分桶（0.5.1；早期按 BoundingBox，见 §3.11），每个桶按 `orderId` 存一个 `TrackedOrder`（余料
-`InventorySummary` + 已消费槽位集合 + 网格边界 + 订单上下文/地址）。vault 全拆时
-`drainAndDrop` 把余料爆成原材料实体（与池包裹同时机 drop，in-vault 碎片由 vanilla break 单独
+`InventorySummary` + 已消费槽位集合 + 网格边界 + 订单上下文/地址）。vault 方块拆除时
+`drainAndDropFraction` 按方案 A 比例 drain 余料爆成原材料实体（与池包裹同时机 drop，in-vault 碎片由 vanilla break 单独
 drop，三者不相交）；双 vault 合并时 `migrateKey` 迁移；末班 `forget` 注销。
 
 > **NeoForge 序列化迁移**：1.21.1 起 `PackageOrderWithCrafts` / `InventorySummary` / `BigItemStack`
@@ -500,12 +499,16 @@ handler 用 `(BlockEntity, CallbackInfo)` 即可）。它不覆盖 add-block res
 
 - **打掉理包机** → vanilla `destroy()` 只 drop `heldBox` + 私有 `queuedExitingPackages`（此时基本是空的，
   因为策略 A 下私有队列只 0~1 元素）。**共享池不爆**，包安全留 SavedData，重放理包机即恢复。
-- **打掉 vault（最后一个 part）/ 扳手拆除** → `ConnectivityHandlerMixin`（注 public `splitMulti`）
-  用 neighborhood UUID scan 判定为**全拆**，触发 `drainAndDrop`，该 vault 的池全爆成实体（0.5.1）。
-- **部分拆 vault（拆剩的方块重新组合）** → neighborhood scan 找到 sibling（同 UUID 的存活 vault BE），
-  判定为 partial break，**不 drain**。剩余 vault 通过 extraData 继承原 UUID，理包机继续从同一个池取（0.5.1）。
-- **扩建 vault（reshape，加/减方块但不全拆）** → 池的 key 是 UUID（不再 BoundingBox），reshape 期间 key
-  **完全不变**，理包机继续从同一个池取。包不爆不丢（见 §3.11）。
+- **打掉 vault（任意方块）/ 扳手拆除** → `ConnectivityHandlerMixin`（注 public `splitMulti`）按
+  N = neighborhood UUID siblings + 1 触发 `drainAndDropFraction(N)`，drain `floor(pending/N)` 个包
+  （额外 +1 个的概率为 `frac(pending/N)`，即 stochastic rounding 让期望严格等于 1/N），
+  **解包内层物品后**按 maxStack 切分成 `ItemEntity` 在该方块上方 0.5 格爆出（方案 A，见 §3.11）。
+  最后一块 N=1 → base=pending、remainder=0 → drain 全部剩余（等同于 0.5.1 原始的"全拆一次爆出"，但物品是解包后的形式）。
+- **扩建 vault（reshape，加方块）** → 走 Create 内部的 `splitMultiAndInvalidate` + `tryToFormNewMulti`，
+  不经 public `splitMulti`，**不触发 drain**。`ItemVaultBlockEntityMixin` 在 `notifyMultiUpdated` 里
+  把池 key（UUID）通过 extraData 从旧 controller 传递到新 controller，包不爆不丢，
+  理包机继续从同一 UUID 取。注意：**拆方块 reshape（拆一块加回去）走的是 break 路径，会触发 1/N drain**
+  （拆一块会爆 1/N，加回去那段不 drain，但前面那 1/N 已经爆出去了——见 §3.11"方案 A"对 reshape 的代价说明）。
 
 > **0.5.0 历史**：0.5.0 用 BoundingBox 作 key，reshape 时通过 `notifyMultiUpdated` HEAD 迁移 key
 > （§3.9⑥）。但不同 BE 在 reshape 期间看到的几何快照不一致，偶发物品复制/丢失。0.5.1 改用 UUID 彻底
@@ -647,24 +650,142 @@ key，理包机分别取到不同的"快照"，引发**物品复制**（多个 k
 （确定性），把所有输家 UUID 的池/tracker 条目 `migrateKey` 到赢家，然后清空 set。单 vault reshape 只
 登记一个 UUID，set size < 2，no-op。
 
-#### 部分拆 vs 全拆的判定（0.5.1 第三次修复）
+#### 方案 A: 每次拆 vault 方块都按 1/N drain（0.5.1 后续加固）
 
-`ConnectivityHandlerMixin.splitMulti` HEAD 不能无条件 drain——拆 vault 一个 part 时，剩余 parts 会重新
-form 一个更小的 multiblock，**通过 extraData 继承同一个 UUID**，in-vault fragments 留在剩余 parts 里，
-理包机继续 craft。如果在 partial break 时 drain，池被清空但订单还在跑，下次 fragment 扫描会重新接管
-订单、重新 craft 64 包——**物品复制**（这是 0.5.1 第一版上线后立刻暴露的 regression）。
+`ConnectivityHandlerMixin.splitMulti` HEAD 在每次 vault 方块拆除时都触发:用 `VaultGeometry.countSiblingsWithUuid`
+扫 ±11 半径范围(vault 最大尺寸的安全余量)统计同 UUID 的存活 sibling 数,得出 `N = siblingCount + 1` (vault
+拆除前的总块数),然后对 `SharedPackagePool` 和 `PartialOrderTracker` 各调一次
+`drainAndDropFraction(uuid, level, brokenPos, N)`——drain 出 `floor(pending/N) + Bernoulli(frac(pending/N))`
+个待发包(整数部分稳定 drain + 小数部分按概率抽一个,期望严格等于 1/N;余料同样按 floor + bernoulli
+切分每个 `BigItemStack.count`),**解包成内层物品后**在该方块位置上方 0.5 格作为 `ItemEntity`
+爆出。最后一块的 N=1 → `base = pending, remainder = 0` → 确定性地 drain 全部剩余(等同旧"全拆一次爆出"路径)。
 
-判定方法（最终方案）：**neighborhood UUID scan**。从被 break 的 part 的 pos 扫 ±11 半径范围（vault 最大
-尺寸的安全余量），找还有没有 vault BE 持有同一 UUID 且未 removed。**找到 sibling → partial break，不
-drain；找不到 → 全拆，drain。**
+**为什么用 floor + Bernoulli 而不是 ceil**:ceil rounding 在池里包数 &lt; N 时永远 drain 至少 1 个,
+导致小订单"拆几块就爆完"(6 包拆 27 块 vault,拆 6 块就把池清空了 — 远超 1/N 比例)。floor + Bernoulli
+让每次 drain 期望严格等于 `pending/N`,无论池 size vs N 的关系:小订单场景拆每块爆 1 个的概率 = `pending/N`
+(其余为 0),总期望爆出在 N 次拆完后 = 原池总数;大订单场景整数部分稳定 drain + 小数部分偶发多 1。
+重复多次 break 后随机抽取平均化,**总期望 drain 严格守恒 = 原池总量,无丢失无复制**。
 
-为什么不信任 `getControllerBE()`：teardown 过程中 controller 字段会被 null（§3.9③ footgun），
-`getControllerBE()` 返回 part 自己，而 part 的 `getWidth()/getHeight()` 字段被 `removeController` 重置成
-1——基于这些字段的 box scan 会算成 1×1×1，完全错过真实几何。直接按 UUID 扫邻居不依赖任何几何字段，
-最可靠。
+**为什么不能用 `getControllerBE()`**:teardown 过程中 controller 字段会被 null(§3.9③ footgun),
+`getControllerBE()` 返回 part 自己,而 part 的 `getWidth()/getHeight()` 字段被 `removeController`
+重置成 1——基于这些字段的 box scan 会算成 1×1×1,完全错过真实几何。直接按 UUID 扫邻居不依赖任何几何
+字段,最可靠。`countSiblingsWithUuid` 每次拆 vault block 跑 23³ ≈ 12k 次 `level.getBlockEntity(p)`——
+O(N) 但 break 是低频事件,可接受。
 
-`anySiblingVaultWithUuidExists` 每次拆 vault block 都跑 23³ ≈ 12k 次 `level.getBlockEntity(p)`——O(N) 但
-break 是低频事件，可接受。
+**为什么 drain 包要解包成内层物品**:0.5.1 原始实现把池里整个 `PackageItem` 当作 `ItemEntity` 爆出,
+1000 个待发包 = 1000 个小箱子实体堆在一个 vault 块位置——既陌生(玩家不一定认识 PackageItem 形式),
+也可能明显超出单 vault 方块容量(单块 27 slot × 64 = 1728 铁锭上限,而 1000 包 × 9 铁锭 = 9000 铁锭)。
+方案 A 用 `PackageItem.getContents(stack)` 取出每个 PackageItem 的 9 slot 内层物品 `ItemStackHandler`,
+累加到一个 `InventorySummary`,再按 maxStack=64 切分成若干 `ItemEntity`——9000 铁锭 = 141 个 stack
+实体,和 vanilla `(/give @p iron_ingot 9000)` 给玩家塞 141 个 stack 的行为一致。PackageItem 的收件
+地址 NBT 被丢弃——vault 已被拆,没有收件人可达,这个丢弃可接受。HeldBox/queue 里的包不参与 drain
+(它们已经在理包机私有队列里走 vanilla 发送状态机)。
+
+**为什么每块 1/N 而不是只在全拆时一次性 drain**:核心关注点是"vault 全拆时单方块爆出超其物理容量
+的物品"的视觉/逻辑不合理。按 1/N 分摊到每次 break 后,3×3×3 vault 拆第 1 块爆 `floor(M/27) +
+Bernoulli(frac(M/27))` 个(期望 M/27,其中 M 是池里待发量),拆第 2 块爆期望 `M' / 26`(M' = M 减去第 1 次
+实际 drain 数)的份额,...,拆最后一块爆期望 M''/1 = 剩余全部——每块爆出的**期望量**接近"单 vault
+方块容量分割 N 份的份额",视觉和 vanilla vault 被逐块拆除时每块爆自己的内容相符。floor + Bernoulli
+的随机力让"拆几块"到"爆出某一份"的对应关系不再是确定性的(避免小池场景 ceil 永远超额 drain),但
+**N 次拆完后期望总 drain = 原池总量**,数学守恒。
+
+**代价 — reshape 不再"零代价"**:0.5.1 原始设计保证"部分拆不 drain、reshape 安全",理由是 pool 被
+部分清空后,下次 fragment 扫描会重新 takeover 订单、重 craft 一批,造成物品复制 regression
+(0.5.1 第一版上线就暴露过)。方案 A 不会触发这种重 takeover regression——drain 出的是 SharedPackagePool
+里**已经合成好的待发包**,不是 vault 里的 fragments,PartialOrderTracker 的 fragment 网格不变,
+不触发重 takeover / 重 craft。但代价是:**玩家 reshape(拆一块加回去)会看到 1/N 池内容爆成物品**,
+捡回即可(都是已合成好的产物,可直接使用)。这是文档化的玩家可见行为改动,考虑到 reshape 是低频
+操作(多数玩家一次成型后很少动 vault),可接受。
+
+**为什么 place reshape 不 drain**:`splitMulti` 只在 `ItemVaultBlock.onRemove`(break / wrench)中调,
+不在 `onPlace` 的 `formMulti` 路径调(`formMulti` 走 private `splitMultiAndInvalidate` + `tryToFormNewMulti`,
+不经 public `splitMulti`)。所以加方块扩建 vault 时不 drain,池完整保留跟随新 UUID。只有拆方块触发
+drain。
+
+**`gdr$vaultId` 的传播时机与 splitMulti HEAD 的提前 propagation(0.5.1 方案 A 在 NeoForge 上线后立即暴露并修复的 bug)**:
+
+vault 的 `gdr$vaultId` 字段**只在 controller 上由 `notifyMultiUpdated` lazy-mint**,其它部件的 UUID 字段
+初始为 `null`,要靠 `splitMultiAndInvalidate` body 里的 `partAt.setExtraData(controllerBE.getExtraData())`
+(line 333) 才被传播过去 —— **该 setExtraData 在 splitMulti HEAD 之后才跑**。
+
+如果在 splitMulti HEAD 不做提前 propagation,会出现两条 regression:
+
+1. **拆 controller 块时 N 算成 1 → 一个 break 整池爆光。** HEAD 读 `vaultId = brokenVault.gdr$vaultId`
+   (controller 自己的 UUID,非 null),但 `countSiblingsWithUuid` 扫邻居 —— 其它部件的 `gdr$vaultId`
+   都还是 null(splitMulti body 未跑),`vaultId.equals(null) == false`,count = 0 → N = 1 →
+   `drainAndDropFraction(N=1)` 把整个池在第一块就 drain 光。同时 splitMulti body 的 setExtraData 还会
+   因为 `controllerBE = level.getBlockEntity(已拆的 controller pos) == null` 而传入 null,我们的 mixin 是
+   no-op → 24 个幸存部件永远没有 UUID,下 tick `notifyMultiUpdated` lazy mint 一个**新 UUID** → 旧池条目
+   孤儿化(没人能再 poll 到)。
+
+2. **拆非 controller 块时直接 early-return → 第一个 break 不 drain 任何东西。** `brokenVault.gdr$vaultId`
+   = null(没被 mint 也没被传播)→ mixin 的 `if (vaultId == null) return;` 直接退出。该 break 一个都不爆,
+   跟"每次 break 都按 1/N 爆出"的设计相违。
+
+**修复(`ConnectivityHandlerMixin` + `VaultGeometry.propagateVaultIdToSiblings`)**: 在 drain 之前
+(1) 如果 brokenVault 的 UUID 为 null,fallback 通过 `brokenVault.getControllerBE()` 读 controller BE 的 UUID
+    (此刻 controller 应还活着——若 brokenVault 自己就是 controller 则等于读 own UUID → fallback 不触发);
+(2) **proactively** 把 vaultId 写到所有同 controller 的幸存部件上
+    (`VaultGeometry.propagateVaultIdToSiblings`,扫 ±11 比对 `getController()` 匹配 brokenVault 的 controller pos)。
+
+这样:
+- 拆 controller 时 N 正确(siblings 含 24 个被预传 UUID 的部件 → N = 25) → 按 1/25 比例 drain,不死爆光;
+- 非拆 controller 时 vaultId 通过 fallback 解析得到,也能按 1/27 比例 drain;
+- 幸存部件提前拿到 vaultId,下 tick re-form 时 `notifyMultiUpdated` 不 mint 新 UUID(因为 `gdr$vaultId != null`
+  lazy-mint 是 no-op),池 key 不变,无孤儿化。
+
+**为什么 controller-pos 比对在这里可靠**: splitMulti HEAD 时 `removeController` 还没跑(那是 body 里
+每个 part 的 `partAt.removeController(true)` 才会跑),幸存部件的 `controller` 字段仍然指向原 controller 的 pos。
+`getController()` 对 controller 自己返回 `worldPosition`,对非 controller 返回 `controller` 字段 ——
+两者在这两种场景下都返回同一个 controller 的 BlockPos。
+
+#### 双 vault 合并的两个边界风险与防御（0.5.1 后续加固）
+
+双 vault 合并在主流路径上同步完成（玩家 place 方块 → `onPlace` 同步触发 `formMulti` → 内部依次
+`splitMultiAndInvalidate` → `tryToFormNewMulti` → `notifyMultiUpdated`，整个过程在同一 tick 同一调用栈
+内，理包机 tick 注入无法插入），但代码层仍存在两个理论风险，已分别加固：
+
+**① `vaultIdOf` 的 part-fallback 误读 stale UUID**
+
+`VaultIdentity.vaultIdOf` 原本在 `getControllerBE()` 返回 null 时兜底用 part 自己（§3.9③ footgun 防御）。
+但 part 在 split 期间通过 extraData 继承了**原 vault 的 UUID**，而 `notifyMultiUpdated` 跑
+`resolveMergeWinner` 后池已经 `migrateKey` 到 winner UUID — 此时 fallback 读到的 part UUID 是输家的，
+池里输家的条目已经被迁移走，理包机 `poll(loser)` 永远空手。
+
+修复：**`controller == null` 直接返回 null**，三个调用点（`PartialRepackager.tryTakeover` /
+`RepackagerBlockEntityMixin.depositToPool` / `PackagerBlockEntityMixin.tick`）都已经 null-safe fallback
+到 vanilla（走 vanilla repack / addAll 私有队列 / 不灌队列）。合并窗口期理包机临时退化为单机 vanilla
+行为，下一 tick `getControllerBE()` 恢复后即恢复并行。不丢物品。
+
+> **与 `ConnectivityHandlerMixin` 的 getControllerBE fallback 不矛盾**。两处场景时机不同:
+> - `vaultIdOf` 是理包机 tick 触发,此刻 vault 拆除动作可能早已结束、`removeController` 已跑,
+>   `getControllerBE()` 退化为 part-self footgun —— 必须 early-return null。
+> - `ConnectivityHandlerMixin` 是 splitMulti HEAD 触发,在 `onRemove` 序列内但 `removeController`
+>   还**没**跑(body 里才跑),`brokenVault.getControllerBE()` 可安全解析 controller BE。
+>
+> 共同点:两处都不用 `getControllerBE()` 做**几何**判定(width/height 好),只用它当 UUID 解析桥。
+
+**② orderId 撞号（`PartialOrderTracker.migrateKey` 静默覆盖）**
+
+字节码确认 Create 在 `LogisticsManager.findPackagersForRequest`（offset 294-300）用 `Random.nextInt()`
+（**全 int 范围**随机）生成 orderId，**不是单调 counter，也不 per-stockkeeper/vault**。同一张订单的所有
+fragment 共享同一个 orderId，但不同订单之间是独立随机数。
+
+撞号概率按生日悖论：约 **2^16 ≈ 65536 个累计订单**才有 50% 概率出现一次撞号 — 实际部署几乎不可能触发。
+但理论存在：若两个 vault 的某被接管订单 orderId 撞号，`migrateKey` 的 `existing.putAll(m)` 会用输家的
+`TrackedOrder`（leftovers + consumedSlots + grid bounds）**静默覆盖**赢家的；下次部分重组扫描到赢家
+orderId 的 fragments 时，`tracker.get(winner, orderId)` 返回输家的状态，可能基于错误状态触发 final
+pass → 物品复制或丢失。
+
+修复：`putAll` 前遍历 `m.keySet()`，对每个 `existing` 已存在的 orderId 打 **`[GDR-PARTIAL] orderId
+collision ... (rare Random.nextInt collision — expect item anomaly)` ERROR 日志**。这是**检测 + 诊断**
+方案，不是恢复 — fragments 的 NBT 不带 origin vault UUID，结构性无法区分撞号的两个订单（要修只能上游
+改 Create 用 `UUID.randomUUID()` 替代 `Random.nextInt()`）。但 ERROR 日志让撞号事件**可观测**，玩家
+反馈物品异常时能立刻定位。
+
+**为什么不主动恢复（不 drainAndDrop 双方）**：撞号罕见到几乎不发生，主动 drain 反而会误杀正常订单
+（如果某天发现新的撞号路径或 orderId 分配机制变化）。**先观测，真撞号了再升级到 drainAndDrop 双方**
+（参考 0.5.1 早期 splitMulti 无条件 drain 的 regression 教训：宁可保守也别激进）。
 
 #### 旧存档兼容
 
@@ -728,9 +849,10 @@ heldBox 生命周期（§3.8），死锁/复制风险高——这正是原版估
 是刻意的**——字节码已摸透 heldBox 被动清空协议，没必要走高危路。
 
 **0.4.0 还要解决的独有问题——vault-centric 归属（§3.9 详述）**：共享池脱离 BlockEntity 存在
-（SavedData），所以"打掉理包机"不会爆池（池留着，重放即恢复），但"打掉/扩建 vault"必须把池爆出来，
-否则包静默吞没。解法是第三个 mixin：`@Inject` `ConnectivityHandler.splitMultiAndInvalidate`，
-在 vault 销毁/reshape 时 drainAndDrop。
+（SavedData），所以"打掉理包机"不会爆池（池留着，重放即恢复），但"打掉 vault"必须把池里的待发包
+回退给玩家，否则包静默吞没。0.4.0 的解法是第三个 mixin：`@Inject` `ConnectivityHandler.splitMulti`，
+在 vault 销毁时 `drainAndDrop`。**0.5.1 后续改为方案 A**：每次拆一个 vault block 都按 1/N 比例 drain
+（解包内层物品后爆出，而非整池 PackageItem 实体形式），加方块扩建不 drain。详见 §3.11"方案 A: 1/N drain"。
 
 **实现细节见 §2.2**。三个注入点（addAll redirect / tick inject / splitMultiAndInvalidate inject）
 见 §2.1。
@@ -875,10 +997,11 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 在 `GodDamnRepackager.java` 里把 `DEBUG_LOGGING = true` 重新编译。开启后：
 - 每次入池打印 `[GDR-POOL] deposited N package(s)` 行：理包机整理后整批入池的总量。
 - 每次空闲理包机取包打印 `[GDR-POOL] fed 1 package` 行：哪个理包机取了包、池里还剩多少。
-- 每次 vault **全拆**（最后一个 part 也拆掉）爆池打印 `[GDR-POOL] drained & dropped N package(s)` 行（0.5.1：部分拆不 drain）。
+- 每次 vault 方块拆除按 1/N drain 池打印 `[GDR-POOL] drained & dropped N item entity(ies) (unpacked from M of K package(s), 1/N share) at vault X` 行（方案 A：M 个包解包成 N 个 ItemEntity）。最后一块 N=1 时 drain 全部剩余。
 - **（0.5.0）** 每次部分趟合成打印 `[GDR-PARTIAL] crafted N package(s) for order ...` 行：渐进合成了几包、消费了几片碎片。
 - **（0.5.0）** 末班收尾打印 `[GDR-PARTIAL] final pass for order ... N package(s) exported, tracker cleared` 行：订单收尾、tracker 注销。
-- **（0.5.0）** vault 全拆爆余料打印 `[GDR-PARTIAL] drained N item(s) from M tracked order(s)` 行（0.5.1：与 pool drain 同一时机）。
+- **（0.5.1 后续/方案 A）** vault 拆除按 1/N drain 余料打印 `[GDR-PARTIAL] drained N item(s) (1/N share from M tracked order(s)) at vault X` 行；
+  双 vault 合并迁移打印 `[GDR-PARTIAL] migrated M tracked order(s)` 行。
 - **（0.5.1）** 双 vault 合并打印 `[GDR-POOL] two-vault merge resolved: winner=... migrated N package(s) to winner` 行（罕见，只在两个独立 vault 合并时）。
 - **（0.5.1 升级）** 旧存档升级到 0.5.1 时一次性打印 `[GDR-POOL] detected legacy BoundingBox-keyed SavedData ...` + `[GDR-PARTIAL] detected legacy ...` 警告（确认池清空）。
 - （0.3.0 的 `[GDR-DIST]` / `[GDR-REBAL]` / `SPLIT MISMATCH` / `REBALANCE MISMATCH` 已随快照+再平衡
@@ -898,9 +1021,9 @@ repack 对手动塞入碎片的处理）。鉴于已连续两次判断失误，*
 | 只有部分理包机工作 | 0.4.0 下应是历史问题：① 若用 0.2.0 升级到 0.2.1+（见 §3.7）。② 0.4.0 共享池架构不依赖 sibling 发现，每机独立 poll，不应再有此问题；若仍有，查 `vaultIdOf` 是否返回 null（targetInventory 未就绪、或邻居不是 vault） |
 | 产物数量不对 | 0.4.0：开 `DEBUG_LOGGING` 看 `[GDR-POOL] deposited` 总量是否 == 订单数，`fed` 累计是否 == deposited。共享池是纯搬运+count 拆分，不等说明 poll/deposit 逻辑错（见 §2.3） |
 | 下游堵塞时积压不消散 | 确认 0.4.0+。堵塞机被 `!heldBox.isEmpty()` 守卫挡住不取新包，活自动流向空闲兄弟（共享池天然均衡）。开 DEBUG 看 `[GDR-POOL] fed` 是否只出现在非堵塞机 |
-| 打掉理包机后包裹"消失" | 这不是 bug——共享池跟着存档走，包裹在池里，重放理包机即恢复（见 §3.9④）。只有完全拆掉 vault 才爆池；扩建 vault / 部分拆 vault 都不爆（0.5.1） |
-| 打掉/扩建 vault 后包裹没爆出来 | 0.5.1：`ConnectivityHandlerMixin` 改用 neighborhood UUID scan 判定全拆 vs 部分拆。部分拆不 drain（剩余 vault 通过 extraData 继承 UUID，订单继续跑）；只有拆到最后一个 part 时才 drain（见 §3.11）。如果完全没爆出来，看启动日志有无 mixin 报错。0.5.0 老问题（`getControllerBE()` footgun 导致算错几何）已修 |
+| 打掉理包机后包裹"消失" | 这不是 bug——共享池跟着存档走，包裹在池里，重放理包机即恢复（见 §3.9④）。只有打掉/扳手拆除 vault 方块才按 1/N drain 池解包爆出；加方块扩建 vault 不 drain（见 §3.11"方案 A"） |
+| 拆 vault 方块后没爆出来 | 方案 A：每次拆一块都应爆出 1/N 池内容的内层物品（见 §3.11"方案 A"）。N = (neighborhood UUID scan 找到的 sibling 数 + 1)。若完全没爆且池非空，看启动日志有无 mixin 报错。0.5.0 老问题（`getControllerBE()` footgun 导致算错几何）已修 |
 | 游戏启动崩溃（打开仓库管理员时） | `@Inject` 参数类型和目标方法不匹配（见 §3.3） |
 | 0.5.1：升级后池被清空 | 0.5.0 的 BoundingBox-keyed SavedData 不兼容，load 时检测到旧格式会 WARN + 清空。alpha break——让订单跑完再升级（见 §3.11 旧存档兼容） |
 | 0.5.1：游戏启动崩 `IllegalClassLoadError: ... is in a defined mixin package` | 引用了注册在 `mixin` 包里的类。共享类必须放根包或独立非-mixin 包（见 §3.11 mixin 包路径陷阱） |
-| 0.5.1：部分拆 vault 后理包机仍在合成、且爆出物品 | 0.5.1 早期版本：splitMulti HEAD 无条件 drain 或基于 `getControllerBE()` footgun 算错几何。已改用 neighborhood UUID scan 判定 partial vs full teardown（见 §3.11）。验证：拆一个 part 不应有 `drained & dropped` 日志 |
+| 0.5.1 后续：拆 vault 后爆出物品但不是 PackageItem 形式 | 这是方案 A 的设计：drain 出的包被 `PackageItem.getContents` 解包成内层 ItemStack 后爆出（不再以 PackageItem 实体形式爆出；见 §3.11"方案 A"）——例如 1000 个含 9 铁锭的包会爆成 141 个 maxStack=64 的铁锭 stack，而不是 1000 个小箱子实体。PackageItem 的收件地址 NBT 在解包时丢弃（vault 已被拆，无收件人可达） |

@@ -290,27 +290,46 @@ public class PartialOrderTracker extends SavedData {
         if (m.isEmpty()) orders.remove(vault);
     }
 
-    /**
-     * Two-vault merge: move all tracked orders from the loser UUID to the winner UUID.
-     * Called in lockstep with {@link SharedPackagePool#resolveMergeWinner}.
-     */
-    public void migrateKey(UUID oldId, UUID newId) {
-        if (oldId.equals(newId)) return;
-        Map<Integer, TrackedOrder> m = orders.remove(oldId);
-        if (m == null || m.isEmpty()) return;
-        Map<Integer, TrackedOrder> existing = orders.get(newId);
-        if (existing == null) {
-            orders.put(newId, m);
-        } else {
-            existing.putAll(m);
+/**
+ * Two-vault merge: move all tracked orders from the loser UUID to the winner UUID.
+ * Called in lockstep with {@link SharedPackagePool#resolveMergeWinner}.
+ *
+ * <p><b>orderId collision detection.</b> Create assigns orderId via
+ * {@code LogisticsManager.findPackagersForRequest} using {@code Random.nextInt()}
+ * (full int range) — see TECHNICAL.md §3.11 "orderId collision risk". Collisions
+ * are statistically rare (~50% probability at ~65536 cumulative orders), but if
+ * one occurs here, {@code putAll} would silently overwrite the winner's tracked
+ * state with the loser's. We can't recover (the fragments' NBT carries no origin
+ * vault UUID, so {@code PartialRepackager} would also merge them by orderId), but
+ * we LOG.ERROR the colliding orderIds so any downstream item anomaly is
+ * diagnosable. See TECHNICAL.md §3.11.</p>
+ */
+public void migrateKey(UUID oldId, UUID newId) {
+    if (oldId.equals(newId)) return;
+    Map<Integer, TrackedOrder> m = orders.remove(oldId);
+    if (m == null || m.isEmpty()) return;
+    Map<Integer, TrackedOrder> existing = orders.get(newId);
+    if (existing == null) {
+        orders.put(newId, m);
+    } else {
+        for (Integer k : m.keySet()) {
+            if (existing.containsKey(k)) {
+                GodDamnRepackager.LOGGER.error(
+                        "[GDR-PARTIAL] orderId collision on vault merge {} -> {}: " +
+                        "tracked order {} state will be overwritten " +
+                        "(rare Random.nextInt collision — expect item anomaly)",
+                        oldId, newId, k);
+            }
         }
-        setDirty();
-        if (GodDamnRepackager.DEBUG_LOGGING) {
-            GodDamnRepackager.LOGGER.info(
-                    "[GDR-PARTIAL] migrated {} tracked order(s) on vault merge {} -> {}",
-                    m.size(), oldId, newId);
-        }
+        existing.putAll(m);
     }
+    setDirty();
+    if (GodDamnRepackager.DEBUG_LOGGING) {
+        GodDamnRepackager.LOGGER.info(
+                "[GDR-PARTIAL] migrated {} tracked order(s) on vault merge {} -> {}",
+                m.size(), oldId, newId);
+    }
+}
 
     /** No-op merge-participant registration; this tracker only mirrors pool migration. */
     public void noteMergeParticipant(UUID id) {
@@ -352,5 +371,79 @@ public class PartialOrderTracker extends SavedData {
                     "[GDR-PARTIAL] drained {} item(s) from {} tracked order(s) at vault {}",
                     dropped, m.size(), pos);
         }
+    }
+
+    /**
+     * Drain a {@code 1/N} fraction of every tracked order's leftovers and drop
+     * the unwound raw materials as item entities at {@code pos}. The remainder
+     * stays in the tracker for the surviving vault to keep crafting. Mirrors
+     * {@link SharedPackagePool#drainAndDropFraction} — see TECHNICAL.md §3.11.
+     *
+     * <p>Per-item rounding uses the same <b>floor + Bernoulli</b> stochastic
+     * rounding as the pool: each leftover stack's {@code count} is split as
+     * {@code floor(count/N)} drained deterministically plus a geometrically
+     * distributed "+1" with probability {@code frac(count/N)}. A single
+     * {@link java.util.Random#nextInt(int)} draw is shared across all stack
+     * takes within one drain call — for each distinct stack, a separate
+     * Bernoulli draw is made (drain decisions across items should be
+     * independent so the expected take per item is exactly {@code count/N}).
+     * After N sequential block breaks (each with the corresponding pre-break
+     * block count N, N-1, ..., 1) the expected leftover drain totals the
+     * original count exactly — no item loss, no duplication.</p>
+     */
+    public void drainAndDropFraction(UUID vault, Level level, BlockPos pos, int N) {
+        if (N <= 0) N = 1; // defensive: avoid div-by-zero
+        Map<Integer, TrackedOrder> m = orders.get(vault);
+        if (m == null || m.isEmpty()) return;
+        InventorySummary dropSummary = new InventorySummary();
+        java.util.Random rng = GodDamnRepackager.DRAIN_RANDOM;
+        for (TrackedOrder t : m.values()) {
+            InventorySummary remaining = new InventorySummary();
+            for (BigItemStack bis : t.leftovers.getStacks()) {
+                int count = Math.max(0, bis.count);
+                int base = count / N;              // floor(count/N)
+                int rem = count % N;               // fractional numerator
+                int take = base;
+                if (rem > 0 && rng.nextInt(N) < rem) take++;  // Bernoulli(rem/N)
+                if (take > 0) dropSummary.add(bis.stack.copy(), take);
+                if (count - take > 0) remaining.add(bis.stack.copy(), count - take);
+            }
+            t.leftovers = remaining;
+        }
+        setDirty();
+        int dropped = dropRawSummary(level, pos, dropSummary);
+        if (dropped > 0 && GodDamnRepackager.DEBUG_LOGGING) {
+            GodDamnRepackager.LOGGER.info(
+                    "[GDR-PARTIAL] drained {} item(s) (1/{} share from {} tracked order(s)) at vault {}",
+                    dropped, N, m.size(), pos);
+        }
+    }
+
+    /**
+     * Drop an {@link InventorySummary} of raw materials as item entities at
+     * {@code (pos.x, pos.y + 0.5, pos.z)}, each stack split by its max stack size.
+     * Mirrors {@code SharedPackagePool.dropSummary} but kept local since the util
+     * shape differs slightly (here the input is already raw items, not unpacked
+     * from packages).
+     */
+    private static int dropRawSummary(Level level, BlockPos pos, InventorySummary summary) {
+        Vec3 dropPos = Vec3.atCenterOf(pos);
+        int dropped = 0;
+        for (BigItemStack bis : summary.getStacks()) {
+            int remaining = Math.max(0, bis.count);
+            while (remaining > 0) {
+                int n = Math.min(remaining, bis.stack.getMaxStackSize());
+                ItemStack stack = bis.stack.copy();
+                stack.setCount(n);
+                if (!stack.isEmpty()) {
+                    ItemEntity entity = new ItemEntity(level, dropPos.x, dropPos.y + 0.5, dropPos.z, stack);
+                    entity.setDefaultPickUpDelay();
+                    level.addFreshEntity(entity);
+                    dropped++;
+                }
+                remaining -= n;
+            }
+        }
+        return dropped;
     }
 }
